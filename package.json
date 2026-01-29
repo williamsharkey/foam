@@ -1,0 +1,17 @@
+{
+  "name": "foam",
+  "version": "0.1.0",
+  "description": "Browser-native cloud OS — virtual Linux terminal powered by Claude",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run-tests.js"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/williamsharkey/foam.git"
+  },
+  "license": "MIT"
+}
