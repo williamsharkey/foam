@@ -49,10 +49,13 @@
       window.__foam = { vfs, shell, terminal, claude, provider };
       window.dispatchEvent(new CustomEvent('foam:ready', { detail: window.__foam }));
 
-      // Boot message
-      terminal.write('\x1b[1mFoam v0.1.0\x1b[0m — Browser-native virtual OS\n');
-      terminal.write('Type commands or \x1b[36mclaude "your message"\x1b[0m to talk to Claude.\n');
-      terminal.write('Run \x1b[33mfoam config set api_key YOUR_KEY\x1b[0m to set your API key.\n\n');
+      // Boot message - styled box like Shiro
+      terminal.write('\x1b[36m╔═══════════════════════════════════════════════╗\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[1;97mFoam OS\x1b[0m \x1b[95mv0.1.0\x1b[0m                            \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[92mBrowser-Native Virtual OS\x1b[0m                 \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   Type \x1b[33mhelp\x1b[0m for available commands          \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m╚═══════════════════════════════════════════════╝\x1b[0m\n');
+      terminal.write('\n');
     }
 
     boot().catch(err => {
