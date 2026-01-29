@@ -51,6 +51,13 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
   try {
     switch (sub) {
       case 'init': {
+        // Pre-create .git directory for isomorphic-git compatibility
+        const gitDir = vfs.resolvePath('.git', dir);
+        try {
+          await vfs.mkdir(gitDir, { recursive: true });
+        } catch (e) {
+          // Ignore if already exists
+        }
         await git.init({ fs, dir });
         stdout(`Initialized empty Git repository in ${dir}/.git/\n`);
         break;
