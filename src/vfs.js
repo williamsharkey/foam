@@ -374,6 +374,109 @@ class VFS {
     return results.sort();
   }
 
+  // ─── Symlinks (isomorphic-git compatibility) ─────────────────────────────
+
+  async symlink(target, path) {
+    path = this.resolvePath(path);
+    const parentPath = path.substring(0, path.lastIndexOf('/')) || '/';
+    const parent = await this._get(parentPath);
+    if (!parent) throw new Error(`symlink: cannot create '${path}': No such file or directory`);
+    const now = Date.now();
+    await this._put({
+      path,
+      type: 'symlink',
+      mode: 0o120000,
+      uid: 1000, gid: 1000,
+      size: target.length,
+      ctime: now, mtime: now, atime: now,
+      content: target,
+      symlinkTarget: target,
+    });
+  }
+
+  async readlink(path) {
+    path = this.resolvePath(path);
+    const inode = await this._get(path);
+    if (!inode) throw new Error(`readlink: '${path}': No such file or directory`);
+    if (inode.type !== 'symlink') throw new Error(`readlink: '${path}': Not a symbolic link`);
+    return inode.symlinkTarget || inode.content;
+  }
+
+  async lstat(path) {
+    // Like stat but does not follow symlinks
+    return this.stat(path);
+  }
+
+  async chmod(path, mode) {
+    path = this.resolvePath(path);
+    const inode = await this._get(path);
+    if (!inode) throw new Error(`chmod: '${path}': No such file or directory`);
+    inode.mode = mode;
+    await this._put(inode);
+  }
+
+  async appendFile(path, data) {
+    path = this.resolvePath(path);
+    const existing = await this._get(path);
+    const prev = existing ? (existing.content || '') : '';
+    await this.writeFile(path, prev + data);
+  }
+
+  // Build fs.promises-compatible API for isomorphic-git
+  toIsomorphicGitFS() {
+    const vfs = this;
+    return {
+      promises: {
+        readFile: async (p, opts) => {
+          const content = await vfs.readFile(p);
+          if (opts === 'utf8' || opts?.encoding === 'utf8') return content;
+          return new TextEncoder().encode(content);
+        },
+        writeFile: async (p, data, opts) => {
+          const str = typeof data === 'string' ? data : new TextDecoder().decode(data);
+          await vfs.writeFile(p, str);
+        },
+        unlink: (p) => vfs.unlink(p),
+        readdir: async (p) => {
+          const entries = await vfs.readdir(p);
+          return entries.map(e => e.name);
+        },
+        mkdir: (p, opts) => vfs.mkdir(p, typeof opts === 'number' ? undefined : opts),
+        rmdir: (p) => vfs.rmdir(p),
+        stat: async (p) => {
+          const s = await vfs.stat(p);
+          return {
+            type: s.type,
+            mode: s.mode,
+            size: s.size,
+            mtime: new Date(s.mtime),
+            ctime: new Date(s.ctime),
+            isFile() { return s.type === 'file'; },
+            isDirectory() { return s.type === 'dir'; },
+            isSymbolicLink() { return s.type === 'symlink'; },
+          };
+        },
+        lstat: async (p) => {
+          const s = await vfs.lstat(p);
+          return {
+            type: s.type,
+            mode: s.mode,
+            size: s.size,
+            mtime: new Date(s.mtime),
+            ctime: new Date(s.ctime),
+            isFile() { return s.type === 'file'; },
+            isDirectory() { return s.type === 'dir'; },
+            isSymbolicLink() { return s.type === 'symlink'; },
+          };
+        },
+        rename: (o, n) => vfs.rename(o, n),
+        symlink: (target, p) => vfs.symlink(target, p),
+        readlink: (p) => vfs.readlink(p),
+        chmod: (p, m) => vfs.chmod(p, m),
+      },
+    };
+  }
+
   _globToRegex(pattern) {
     let re = pattern
       .replace(/[.+^${}()|[\]\\]/g, '\\$&')
