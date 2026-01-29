@@ -98,6 +98,24 @@
       const echoResult = await shell.exec('echo hello fluffy');
       assert('fluffy echo via shell', echoResult.stdout.includes('hello fluffy'));
 
+      // 15c. Fluffy grep filters correctly (fluffycoreutils#4)
+      await vfs.writeFile('/tmp/greptest.txt', 'hello world\nfoo bar\nhello again\n');
+      vfs.chdir('/tmp');
+      const grepResult = await shell.exec('grep hello /tmp/greptest.txt');
+      assert('grep filters matching lines', grepResult.exitCode === 0);
+      assert('grep returns only matches', grepResult.stdout.includes('hello world') && grepResult.stdout.includes('hello again') && !grepResult.stdout.includes('foo bar'));
+
+      // 15d. Pipe grep works
+      const pipeGrepResult = await shell.exec('cat /tmp/greptest.txt | grep foo');
+      assert('pipe grep', pipeGrepResult.exitCode === 0 && pipeGrepResult.stdout.includes('foo bar') && !pipeGrepResult.stdout.includes('hello'));
+
+      // 15e. Multi-command pipe
+      const multiPipe = await shell.exec('echo "aaa\nbbb\nccc" | grep -v bbb | wc -l');
+      assert('multi-command pipe', multiPipe.exitCode === 0);
+
+      await vfs.unlink('/tmp/greptest.txt');
+      vfs.chdir('/tmp/testdir');
+
       // 16. Glob command works
       await vfs.writeFile('/tmp/testdir/foo.js', 'a');
       await vfs.writeFile('/tmp/testdir/bar.js', 'b');
