@@ -38,7 +38,12 @@
 
       // 5. Commands module loads
       const { default: commands } = await import('../src/commands.js');
-      assert('commands module loads', typeof commands.ls === 'function');
+      assert('commands module loads', typeof commands.cd === 'function');
+
+      // 5b. Register fluffycoreutils
+      const { registerFluffyCommands } = await import('../src/fluffy-bridge.js');
+      registerFluffyCommands();
+      assert('fluffy commands registered', typeof commands.ls === 'function');
       assert('commands.grep exists', typeof commands.grep === 'function');
       assert('commands.cat exists', typeof commands.cat === 'function');
 
@@ -85,7 +90,15 @@
       assert('provider.getCwd()', provider.getCwd() === '/tmp/testdir');
       assert('provider.getHostInfo()', provider.getHostInfo().name === 'Foam');
 
-      // 15. Glob command works
+      // 15. Fluffy cat command works through shell
+      const catResult = await shell.exec('cat /tmp/test.txt');
+      assert('fluffy cat via shell', catResult.exitCode === 0 && catResult.stdout.includes('hello foam'));
+
+      // 15b. Fluffy echo command works
+      const echoResult = await shell.exec('echo hello fluffy');
+      assert('fluffy echo via shell', echoResult.stdout.includes('hello fluffy'));
+
+      // 16. Glob command works
       await vfs.writeFile('/tmp/testdir/foo.js', 'a');
       await vfs.writeFile('/tmp/testdir/bar.js', 'b');
       const globResult = await shell.exec('glob "*.js" /tmp/testdir');
