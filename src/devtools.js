@@ -199,14 +199,24 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
       case 'clone': {
         const url = subArgs[0];
         if (!url) { stderr('error: must specify repository URL\n'); return 1; }
+        const repoName = url.split('/').pop()?.replace(/\.git$/, '') || 'repo';
         const targetDir = subArgs[1]
           ? vfs.resolvePath(subArgs[1])
-          : dir + '/' + url.split('/').pop()?.replace('.git', '');
+          : vfs.resolvePath(repoName);
         await vfs.mkdir(targetDir, { recursive: true });
-        stdout(`Cloning into '${targetDir}'...\n`);
+        // Pre-create .git directory for isomorphic-git compatibility
+        const gitDir = vfs.resolvePath('.git', targetDir);
+        try {
+          await vfs.mkdir(gitDir, { recursive: true });
+        } catch (e) {
+          // Ignore if already exists
+        }
+        stdout(`Cloning into '${repoName}'...\n`);
         await git.clone({
           fs, http, dir: targetDir, url,
           corsProxy: 'https://cors.isomorphic-git.org',
+          singleBranch: true,
+          depth: 1,
         });
         stdout('done.\n');
         break;
