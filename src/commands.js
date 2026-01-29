@@ -711,4 +711,54 @@ commands.cut = async (args, { stdin, stdout }) => {
   return 0;
 };
 
+// ─── HTTP ───────────────────────────────────────────────────────────────────
+
+commands.fetch = async (args, { stdout, stderr }) => {
+  let url = null;
+  let method = 'GET';
+  let body = null;
+  const headers = {};
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-m' || args[i] === '--method') { method = (args[++i] || 'GET').toUpperCase(); }
+    else if (args[i] === '-H' || args[i] === '--header') {
+      const h = args[++i] || '';
+      const colon = h.indexOf(':');
+      if (colon > 0) headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim();
+    }
+    else if (args[i] === '-d' || args[i] === '--data') { body = args[++i]; method = method === 'GET' ? 'POST' : method; }
+    else if (args[i] === '-o' || args[i] === '--output') { /* output file — handled below */ }
+    else if (args[i] === '-v' || args[i] === '--verbose') { /* verbose flag */ }
+    else if (!args[i].startsWith('-')) { url = args[i]; }
+  }
+
+  if (!url) { stderr('fetch: missing URL\n'); return 1; }
+
+  try {
+    const opts = { method, headers };
+    if (body) opts.body = body;
+    const res = await globalThis.fetch(url, opts);
+    const text = await res.text();
+    stdout(text);
+    if (!res.ok) { stderr(`HTTP ${res.status} ${res.statusText}\n`); return 1; }
+    return 0;
+  } catch (err) {
+    stderr(`fetch: ${err.message}\n`);
+    return 1;
+  }
+};
+
+commands.curl = async (args, ctx) => {
+  // Map curl-style flags to fetch flags
+  const fetchArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-X') { fetchArgs.push('-m', args[++i]); }
+    else if (args[i] === '-H') { fetchArgs.push('-H', args[++i]); }
+    else if (args[i] === '-d' || args[i] === '--data') { fetchArgs.push('-d', args[++i]); }
+    else if (args[i] === '-s' || args[i] === '--silent') { /* skip */ }
+    else { fetchArgs.push(args[i]); }
+  }
+  return commands.fetch(fetchArgs, ctx);
+};
+
 export default commands;

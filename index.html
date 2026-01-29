@@ -39,7 +39,10 @@
 
       // Create FoamProvider (ready for Spirit integration)
       const provider = new FoamProvider(vfs, shell, terminal);
+
+      // Expose global for test automation (windwalker) and Spirit integration
       window.__foam = { vfs, shell, terminal, claude, provider };
+      window.dispatchEvent(new CustomEvent('foam:ready', { detail: window.__foam }));
 
       // Boot message
       terminal.write('\x1b[1mFoam v0.1.0\x1b[0m — Browser-native virtual OS\n');

@@ -360,10 +360,15 @@ class VFS {
   async glob(pattern, basePath) {
     basePath = basePath ? this.resolvePath(basePath) : this.cwd;
     const results = [];
-    const regex = this._globToRegex(pattern);
-    for (const [p] of this.cache) {
-      if (p.startsWith(basePath) && regex.test(p)) {
-        results.push(p);
+    // Build regex from the full pattern anchored at basePath
+    const fullPattern = pattern.startsWith('/') ? pattern : (basePath === '/' ? '/' : basePath + '/') + pattern;
+    const regex = this._globToRegex(fullPattern);
+    for (const [p, node] of this.cache) {
+      if (p.startsWith(basePath) && node.type === 'file' && regex.test(p)) {
+        // Return paths relative to basePath (matches Spirit/Shiro behavior)
+        let rel = p.slice(basePath.length);
+        if (rel.startsWith('/')) rel = rel.slice(1);
+        results.push(rel || p);
       }
     }
     return results.sort();

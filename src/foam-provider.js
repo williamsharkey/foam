@@ -29,18 +29,21 @@ class FoamProvider {
   }
 
   async readdir(path) {
-    const entries = await this.vfs.readdir(path);
-    // Spirit expects FileInfo[]: { name, type, size }
+    const resolved = this.vfs.resolvePath(path);
+    const entries = await this.vfs.readdir(resolved);
+    // Spirit expects FileInfo[]: { name, path, type, size, mtime }
     return entries.map(e => ({
       name: e.name,
+      path: e.path,
       type: e.type,
       size: e.size,
+      mtime: e.mtime,
     }));
   }
 
   async stat(path) {
     const s = await this.vfs.stat(path);
-    // Spirit expects StatResult: { type, size, mode, mtime, ctime, atime }
+    // Spirit expects StatResult: { type, size, mtime, isFile(), isDirectory() }
     return {
       type: s.type,
       size: s.size,
@@ -48,6 +51,8 @@ class FoamProvider {
       mtime: s.mtime,
       ctime: s.ctime,
       atime: s.atime,
+      isFile() { return s.type === 'file'; },
+      isDirectory() { return s.type === 'dir'; },
     };
   }
 
