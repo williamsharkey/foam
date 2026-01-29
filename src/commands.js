@@ -105,6 +105,34 @@ commands.alias = async (args, { stdout, stderr, exec }) => {
   return 0;
 };
 
+commands.source = async (args, { stdout, stderr, vfs, exec }) => {
+  if (args.length === 0) { stderr('source: missing filename\n'); return 1; }
+  try {
+    const content = await vfs.readFile(args[0]);
+    const lines = content.split('\n');
+    let lastExit = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (exec) {
+        const r = await exec(trimmed);
+        if (typeof r === 'object') {
+          if (r.stdout) stdout(r.stdout);
+          if (r.stderr) stderr(r.stderr);
+          lastExit = r.exitCode;
+        } else {
+          lastExit = r;
+        }
+      }
+    }
+    return lastExit;
+  } catch (err) {
+    stderr(`source: ${err.message}\n`);
+    return 1;
+  }
+};
+commands['.'] = commands.source;
+
 commands.type = async (args, { stdout, stderr }) => {
   for (const a of args) {
     if (commands[a]) {

@@ -166,7 +166,7 @@ class Shell {
       vfs: this.vfs,
       env: this.vfs.env,
       terminal: this.terminal,
-      exec: (cmd) => this.exec(cmd).then(r => { actualStdout(r.stdout); actualStderr(r.stderr); return r.exitCode; }),
+      exec: (cmd) => this.exec(cmd),
     };
 
     let exitCode;
