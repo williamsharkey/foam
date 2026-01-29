@@ -72,6 +72,51 @@ commands['['] = async (args, ctx) => {
   return commands.test(args, ctx);
 };
 
+commands.help = async (args, { stdout }) => {
+  const names = Object.keys(commands).filter(n => n !== '[').sort();
+  stdout('Available commands:\n');
+  const cols = 6;
+  for (let i = 0; i < names.length; i += cols) {
+    const row = names.slice(i, i + cols).map(n => n.padEnd(14)).join('');
+    stdout('  ' + row + '\n');
+  }
+  stdout('\nFoam-specific: dom, js, glob, fetch, curl, sleep, seq\n');
+  stdout('Dev tools:     git, npm, node\n');
+  stdout('Claude:        claude "your message"\n');
+  stdout('Config:        foam config set api_key <key>\n');
+  return 0;
+};
+
+commands.history = async (args, { stdout, terminal }) => {
+  if (!terminal || !terminal.history) {
+    stdout('(no history available)\n');
+    return 0;
+  }
+  for (let i = 0; i < terminal.history.length; i++) {
+    stdout(`${String(i + 1).padStart(5)}  ${terminal.history[i]}\n`);
+  }
+  return 0;
+};
+
+commands.alias = async (args, { stdout, stderr, exec }) => {
+  // exec is a reference to shell.exec, we need shell for aliases
+  // For now, just list/set aliases via env-like syntax
+  stdout('alias: not yet implemented\n');
+  return 0;
+};
+
+commands.type = async (args, { stdout, stderr }) => {
+  for (const a of args) {
+    if (commands[a]) {
+      stdout(`${a} is a shell builtin\n`);
+    } else {
+      stderr(`type: ${a}: not found\n`);
+      return 1;
+    }
+  }
+  return 0;
+};
+
 // ─── GLOB ───────────────────────────────────────────────────────────────────
 
 commands.glob = async (args, { stdout, stderr, vfs }) => {

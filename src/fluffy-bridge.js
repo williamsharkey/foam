@@ -50,6 +50,15 @@ function createFluffyFS(vfs) {
     async rmdir(path, opts) {
       return vfs.rmdir(path, opts);
     },
+    async symlink(target, path) {
+      return vfs.symlink(target, path);
+    },
+    async readlink(path) {
+      return vfs.readlink(path);
+    },
+    async copy(src, dest, opts) {
+      return vfs.copy(src, dest, opts);
+    },
     resolvePath(path, cwd) {
       // FluffyFS passes explicit cwd; use Foam's resolution but
       // temporarily set cwd if needed

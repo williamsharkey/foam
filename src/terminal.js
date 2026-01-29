@@ -1,4 +1,5 @@
 // Terminal UI — renders a terminal in the browser with prompt, history, ANSI color support
+import commands from './commands.js';
 
 class Terminal {
   constructor(container, shell) {
@@ -221,6 +222,24 @@ class Terminal {
     const prefix = lastSpace === -1 ? val : val.slice(lastSpace + 1);
     if (!prefix) return;
 
+    // If completing the first word, try command names
+    if (lastSpace === -1) {
+      const cmdNames = Object.keys(commands).filter(n => n.startsWith(prefix));
+      if (cmdNames.length === 1) {
+        this.input.value = cmdNames[0] + ' ';
+        return;
+      } else if (cmdNames.length > 1) {
+        this.write('\n' + cmdNames.join('  ') + '\n');
+        let common = cmdNames[0];
+        for (const n of cmdNames) {
+          while (!n.startsWith(common)) common = common.slice(0, -1);
+        }
+        this.input.value = common;
+        return;
+      }
+    }
+
+    // File/directory completion
     try {
       const dir = prefix.includes('/') ? prefix.substring(0, prefix.lastIndexOf('/')) || '/' : '.';
       const base = prefix.includes('/') ? prefix.substring(prefix.lastIndexOf('/') + 1) : prefix;
@@ -234,7 +253,6 @@ class Terminal {
         this.input.value = val + completion + suffix;
       } else if (matches.length > 1) {
         this.write('\n' + matches.map(m => m.name).join('  ') + '\n');
-        // Find common prefix
         let common = matches[0].name;
         for (const m of matches) {
           while (!m.name.startsWith(common)) common = common.slice(0, -1);
