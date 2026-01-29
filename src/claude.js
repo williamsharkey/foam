@@ -28,8 +28,10 @@ Environment:
 - Shell: /bin/sh (JavaScript implementation)
 - Working directory: ${this.shell.vfs.cwd}
 - User: user
-- Available commands: ls, cd, pwd, cat, echo, mkdir, rm, cp, mv, touch, head, tail, wc, grep, find, sort, uniq, tee, chmod, sed, diff, env, export, date, whoami, hostname, uname, test, git, npm, node
-- You also have direct access to the browser DOM and JavaScript VM
+- Available commands: ls, cd, pwd, cat, echo, mkdir, rm, cp, mv, touch, head, tail, wc, grep, find, sort, uniq, tee, chmod, sed, diff, env, export, date, whoami, hostname, uname, test, git, npm, node, glob, js, dom, fetch, curl
+- You have direct access to the browser DOM via the "dom" command and "js" command, and the js_eval tool
+- The "dom" command supports: query, count, text, html, attr, set-text, set-html, set-attr, add-class, rm-class, create, remove, style
+- The "js" command evaluates JavaScript in the page context with full DOM access
 
 You can execute shell commands, read/write files, and run JavaScript. All files persist across sessions.
 
@@ -128,11 +130,9 @@ When the user asks you to do something, use the tools available to complete the 
   async _loop() {
     const maxTurns = 50;
     for (let turn = 0; turn < maxTurns; turn++) {
-      this.terminal.write('\x1b[90m...\x1b[0m\n');
-
       let response;
       try {
-        response = await this._callApi();
+        response = await this._callApiStream();
       } catch (err) {
         this.terminal.writeError(`API error: ${err.message}\n`);
         return;
@@ -145,15 +145,9 @@ When the user asks you to do something, use the tools available to complete the 
       for (const block of response.content) {
         if (block.type === 'text') {
           hasText = true;
-          this.terminal.write(block.text + '\n');
+          // Text was already streamed to terminal during _callApiStream
         } else if (block.type === 'tool_use') {
-          this.terminal.write(`\x1b[36m► ${block.name}\x1b[0m`);
-          if (block.name === 'bash') {
-            this.terminal.write(`: ${block.input.command}\n`);
-          } else {
-            this.terminal.write('\n');
-          }
-
+          // Tool header was already shown during streaming
           const result = await this._executeTool(block);
           toolResults.push({
             type: 'tool_result',
@@ -179,7 +173,7 @@ When the user asks you to do something, use the tools available to complete the 
     }
   }
 
-  async _callApi() {
+  async _callApiStream() {
     const res = await fetch(API_URL, {
       method: 'POST',
       headers: {
@@ -191,6 +185,7 @@ When the user asks you to do something, use the tools available to complete the 
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 8192,
+        stream: true,
         system: this.systemPrompt,
         tools: this.tools,
         messages: this.messages,
@@ -202,7 +197,91 @@ When the user asks you to do something, use the tools available to complete the 
       throw new Error(`${res.status}: ${errBody}`);
     }
 
-    return res.json();
+    // Parse SSE stream
+    const content = [];
+    let stopReason = null;
+    let currentBlock = null;
+    let currentTextIdx = -1;
+    let inputJsonBuf = '';
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split('\n');
+      buf = lines.pop(); // keep incomplete last line
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+
+        let event;
+        try { event = JSON.parse(data); } catch { continue; }
+
+        switch (event.type) {
+          case 'content_block_start': {
+            const block = event.content_block;
+            if (block.type === 'text') {
+              currentBlock = { type: 'text', text: '' };
+              currentTextIdx = event.index;
+              content.push(currentBlock);
+            } else if (block.type === 'tool_use') {
+              currentBlock = { type: 'tool_use', id: block.id, name: block.name, input: {} };
+              inputJsonBuf = '';
+              content.push(currentBlock);
+              this.terminal.write(`\x1b[36m► ${block.name}\x1b[0m`);
+            }
+            break;
+          }
+          case 'content_block_delta': {
+            const delta = event.delta;
+            if (delta.type === 'text_delta') {
+              const text = delta.text;
+              if (currentBlock && currentBlock.type === 'text') {
+                currentBlock.text += text;
+              }
+              this.terminal.write(text);
+            } else if (delta.type === 'input_json_delta') {
+              inputJsonBuf += delta.partial_json;
+            }
+            break;
+          }
+          case 'content_block_stop': {
+            if (currentBlock && currentBlock.type === 'text') {
+              this.terminal.write('\n');
+            } else if (currentBlock && currentBlock.type === 'tool_use') {
+              try {
+                currentBlock.input = JSON.parse(inputJsonBuf);
+              } catch {
+                currentBlock.input = {};
+              }
+              if (currentBlock.name === 'bash' && currentBlock.input.command) {
+                this.terminal.write(`: ${currentBlock.input.command}\n`);
+              } else {
+                this.terminal.write('\n');
+              }
+              inputJsonBuf = '';
+            }
+            currentBlock = null;
+            break;
+          }
+          case 'message_delta': {
+            if (event.delta?.stop_reason) {
+              stopReason = event.delta.stop_reason;
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    return { content, stop_reason: stopReason };
   }
 
   async _executeTool(block) {

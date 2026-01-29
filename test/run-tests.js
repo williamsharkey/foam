@@ -39,6 +39,8 @@ async function run() {
   const browser = await launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    timeout: 60000,
+    protocolTimeout: 60000,
   });
 
   const page = await browser.newPage();
