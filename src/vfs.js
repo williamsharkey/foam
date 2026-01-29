@@ -5,6 +5,20 @@ const DB_NAME = 'foam-vfs';
 const DB_VERSION = 1;
 const STORE_NAME = 'inodes';
 
+// Helper to create Node.js-style errors with .code property for isomorphic-git compatibility
+function fsError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  // Add errno for better isomorphic-git compatibility
+  err.errno = code === 'ENOENT' ? -2 :
+              code === 'EEXIST' ? -17 :
+              code === 'EISDIR' ? -21 :
+              code === 'ENOTDIR' ? -20 :
+              code === 'ENOTEMPTY' ? -39 :
+              -1; // Generic error
+  return err;
+}
+
 class VFS {
   constructor() {
     this.db = null;
@@ -166,7 +180,7 @@ class VFS {
   async stat(path) {
     path = this.resolvePath(path);
     const inode = await this._get(path);
-    if (!inode) throw new Error(`stat: cannot stat '${path}': No such file or directory`);
+    if (!inode) throw fsError('ENOENT', `ENOENT: no such file or directory, stat '${path}'`);
     return { ...inode };
   }
 
@@ -178,8 +192,8 @@ class VFS {
   async readFile(path) {
     path = this.resolvePath(path);
     const inode = await this._get(path);
-    if (!inode) throw new Error(`cat: ${path}: No such file or directory`);
-    if (inode.type === 'dir') throw new Error(`cat: ${path}: Is a directory`);
+    if (!inode) throw fsError('ENOENT', `ENOENT: no such file or directory, open '${path}'`);
+    if (inode.type === 'dir') throw fsError('EISDIR', `EISDIR: illegal operation on a directory, read`);
     inode.atime = Date.now();
     await this._put(inode);
     return inode.content || '';
@@ -404,7 +418,10 @@ class VFS {
 
   async lstat(path) {
     // Like stat but does not follow symlinks
-    return this.stat(path);
+    path = this.resolvePath(path);
+    const inode = await this._get(path);
+    if (!inode) throw fsError('ENOENT', `ENOENT: no such file or directory, lstat '${path}'`);
+    return { ...inode };
   }
 
   async chmod(path, mode) {
@@ -444,30 +461,42 @@ class VFS {
         mkdir: (p, opts) => vfs.mkdir(p, typeof opts === 'number' ? undefined : opts),
         rmdir: (p) => vfs.rmdir(p),
         stat: async (p) => {
-          const s = await vfs.stat(p);
-          return {
-            type: s.type,
-            mode: s.mode,
-            size: s.size,
-            mtime: new Date(s.mtime),
-            ctime: new Date(s.ctime),
-            isFile() { return s.type === 'file'; },
-            isDirectory() { return s.type === 'dir'; },
-            isSymbolicLink() { return s.type === 'symlink'; },
-          };
+          try {
+            const s = await vfs.stat(p);
+            return {
+              type: s.type,
+              mode: s.mode,
+              size: s.size,
+              mtime: new Date(s.mtime),
+              ctime: new Date(s.ctime),
+              isFile() { return s.type === 'file'; },
+              isDirectory() { return s.type === 'dir'; },
+              isSymbolicLink() { return s.type === 'symlink'; },
+            };
+          } catch (err) {
+            // Re-throw with proper error structure for isomorphic-git
+            if (err.code === 'ENOENT') throw err;
+            throw fsError('ENOENT', `ENOENT: no such file or directory, stat '${p}'`);
+          }
         },
         lstat: async (p) => {
-          const s = await vfs.lstat(p);
-          return {
-            type: s.type,
-            mode: s.mode,
-            size: s.size,
-            mtime: new Date(s.mtime),
-            ctime: new Date(s.ctime),
-            isFile() { return s.type === 'file'; },
-            isDirectory() { return s.type === 'dir'; },
-            isSymbolicLink() { return s.type === 'symlink'; },
-          };
+          try {
+            const s = await vfs.lstat(p);
+            return {
+              type: s.type,
+              mode: s.mode,
+              size: s.size,
+              mtime: new Date(s.mtime),
+              ctime: new Date(s.ctime),
+              isFile() { return s.type === 'file'; },
+              isDirectory() { return s.type === 'dir'; },
+              isSymbolicLink() { return s.type === 'symlink'; },
+            };
+          } catch (err) {
+            // Re-throw with proper error structure for isomorphic-git
+            if (err.code === 'ENOENT') throw err;
+            throw fsError('ENOENT', `ENOENT: no such file or directory, lstat '${p}'`);
+          }
         },
         rename: (o, n) => vfs.rename(o, n),
         symlink: (target, p) => vfs.symlink(target, p),

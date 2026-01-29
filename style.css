@@ -6,11 +6,11 @@
 
 html, body {
   height: 100%;
-  background: #0a0a0a;
-  color: #d4d4d4;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.2;
 }
 
 .foam-terminal {
@@ -30,7 +30,7 @@ html, body {
 }
 
 .foam-stderr {
-  color: #c23621;
+  color: #ff6b6b;
 }
 
 .foam-input-line {
@@ -40,7 +40,7 @@ html, body {
 }
 
 .foam-prompt {
-  color: #25bc24;
+  color: #51cf66;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -50,11 +50,11 @@ html, body {
   background: transparent;
   border: none;
   outline: none;
-  color: #d4d4d4;
+  color: #e0e0e0;
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
-  caret-color: #d4d4d4;
+  caret-color: #00d4ff;
 }
 
 .foam-input:disabled {
@@ -67,20 +67,20 @@ html, body {
 }
 
 .foam-terminal::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: #1a1a2e;
 }
 
 .foam-terminal::-webkit-scrollbar-thumb {
-  background: #333;
+  background: #4a4a6a;
   border-radius: 4px;
 }
 
 .foam-terminal::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: #5a5a7a;
 }
 
 /* Selection */
 ::selection {
-  background: #264f78;
-  color: #fff;
+  background: #3d3d5c;
+  color: #ffffff;
 }

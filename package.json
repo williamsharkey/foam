@@ -4,7 +4,10 @@
   "description": "Browser-native cloud OS — virtual Linux terminal powered by Claude",
   "type": "module",
   "scripts": {
-    "test": "node test/run-tests.js"
+    "test": "node test/run-tests-skyeyes.js",
+    "test:puppeteer": "node test/run-tests.js",
+    "test:check": "node test/skyeyes-helper.js check",
+    "test:info": "node test/skyeyes-helper.js info"
   },
   "devDependencies": {
     "puppeteer": "^24.0.0"
