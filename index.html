@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Foam</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="terminal"></div>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import Shell from './src/shell.js';
+    import Terminal from './src/terminal.js';
+    import ClaudeClient from './src/claude.js';
+    import FoamProvider from './src/foam-provider.js';
+    // devtools.js registers git/npm/node into commands on import
+    import './src/devtools.js';
+
+    async function boot() {
+      // Initialize virtual filesystem
+      const vfs = new VFS();
+      await vfs.init();
+
+      // Initialize shell
+      const shell = new Shell(vfs);
+
+      // Initialize terminal UI
+      const container = document.getElementById('terminal');
+      const terminal = new Terminal(container, shell);
+
+      // Initialize Claude client
+      const claude = new ClaudeClient(shell, terminal);
+      terminal.claudeClient = claude;
+      terminal.onConfigChange = () => {
+        claude.setApiKey(localStorage.getItem('foam_api_key') || '');
+      };
+
+      // Create FoamProvider (ready for Spirit integration)
+      const provider = new FoamProvider(vfs, shell, terminal);
+      window.__foam = { vfs, shell, terminal, claude, provider };
+
+      // Boot message
+      terminal.write('\x1b[1mFoam v0.1.0\x1b[0m — Browser-native virtual OS\n');
+      terminal.write('Type commands or \x1b[36mclaude "your message"\x1b[0m to talk to Claude.\n');
+      terminal.write('Run \x1b[33mfoam config set api_key YOUR_KEY\x1b[0m to set your API key.\n\n');
+    }
+
+    boot().catch(err => {
+      document.body.textContent = 'Boot failed: ' + err.message;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>

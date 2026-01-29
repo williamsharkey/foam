@@ -1,0 +1,86 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  background: #0a0a0a;
+  color: #d4d4d4;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.foam-terminal {
+  height: 100vh;
+  overflow-y: auto;
+  padding: 8px 12px;
+  cursor: text;
+}
+
+.foam-output {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.foam-output span {
+  display: inline;
+}
+
+.foam-stderr {
+  color: #c23621;
+}
+
+.foam-input-line {
+  display: flex;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.foam-prompt {
+  color: #25bc24;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.foam-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  caret-color: #d4d4d4;
+}
+
+.foam-input:disabled {
+  opacity: 0.5;
+}
+
+/* Scrollbar */
+.foam-terminal::-webkit-scrollbar {
+  width: 8px;
+}
+
+.foam-terminal::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.foam-terminal::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+
+.foam-terminal::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Selection */
+::selection {
+  background: #264f78;
+  color: #fff;
+}

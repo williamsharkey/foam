@@ -175,21 +175,40 @@ These give Claude direct access to the page it's running on.
 - `canvas` API access for drawing
 - `localStorage` / `sessionStorage` read/write (namespaced to avoid collision with VFS)
 
+## Spirit Integration
+
+Foam's Claude agent is powered by [Spirit](https://github.com/williamsharkey/spirit) — a shared Claude Code agent loop library that targets virtual OS environments.
+
+Spirit defines an `OSProvider` interface. Foam implements `FoamProvider` (`src/foam-provider.js`) which adapts the VFS and shell to Spirit's expectations. This means Spirit handles the Claude API calls, tool definitions, and agent loop — Foam just provides the OS layer.
+
+```
+Spirit (agent loop)  ←→  FoamProvider  ←→  VFS + Shell + Terminal
+```
+
+Until Spirit ships its ES module bundle, Foam includes a standalone `claude.js` that implements the same tool_use loop directly. Once `spirit.es.js` is available, `claude.js` gets replaced with a Spirit import.
+
+**Coordination issues filed on Spirit:**
+- [#1](https://github.com/williamsharkey/spirit/issues/1) — FileInfo/StatResult type definitions
+- [#2](https://github.com/williamsharkey/spirit/issues/2) — exec() shell contract
+- [#3](https://github.com/williamsharkey/spirit/issues/3) — ES module bundle for Foam
+- [#4](https://github.com/williamsharkey/spirit/issues/4) — DOM/JS tools scope
+- [#5](https://github.com/williamsharkey/spirit/issues/5) — Custom tool registration API
+
 ## File Structure
 
 ```
 foam/
-├── index.html          # Single entry point, loads everything
+├── index.html              # Single entry point, loads everything
 ├── README.md
+├── style.css               # Terminal styling
 ├── src/
-│   ├── vfs.js          # Virtual filesystem + IndexedDB
-│   ├── commands.js     # Coreutils implementations
-│   ├── shell.js        # Command parser + pipeline executor
-│   ├── terminal.js     # Terminal UI rendering
-│   ├── claude.js       # Claude API client + tool loop
-│   ├── devtools.js     # git, npm, node implementations
-│   └── domtools.js     # DOM/page access tools
-└── style.css           # Terminal styling
+│   ├── vfs.js              # Virtual filesystem + IndexedDB
+│   ├── commands.js         # Coreutils (ls, grep, cat, sed, etc.)
+│   ├── shell.js            # Command parser + pipeline executor
+│   ├── terminal.js         # Terminal UI rendering
+│   ├── claude.js           # Claude API client (interim, replaced by Spirit)
+│   ├── devtools.js         # git, npm, node implementations
+│   └── foam-provider.js    # Spirit OSProvider adapter
 ```
 
 ## Usage
@@ -220,12 +239,14 @@ foam/
 Under active development. Current progress:
 
 - [x] Virtual filesystem with IndexedDB persistence
-- [ ] Shell commands (coreutils)
-- [ ] Shell interpreter (pipes, redirects, variables)
-- [ ] Terminal UI
-- [ ] Claude API integration with tool_use loop
-- [ ] Dev tools (git, npm, node)
-- [ ] DOM access tools
+- [x] Shell commands (30+ coreutils)
+- [x] Shell interpreter (pipes, redirects, `&&`/`||`, variable expansion, command substitution)
+- [x] Terminal UI (history, tab completion, ANSI colors, Ctrl+C)
+- [x] Claude API integration with tool_use loop
+- [x] Dev tools (git, npm, node)
+- [x] FoamProvider for Spirit integration
+- [ ] Spirit submodule integration (waiting on Spirit ES bundle)
+- [ ] DOM access tools (pending Spirit tool registration API)
 
 ## License
 
