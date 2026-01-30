@@ -48,11 +48,9 @@ class Shell {
       return this._execControlStructure(input, { stdout, stderr });
     }
 
-    // Expand arithmetic $((...))
-    input = this._expandArithmetic(input);
-
-    // Note: variable expansion is deferred to per-command execution
-    // in _execLogicChain so that `export X=1 && echo $X` works correctly.
+    // Note: variable expansion AND arithmetic expansion are deferred to
+    // per-command execution in _execLogicChain so that
+    // `export X=1 && echo $X` and `export x=10 && echo $((x * 2))` work correctly.
 
     // Split on ; (respecting quotes)
     const statements = this._splitStatements(input);
@@ -61,6 +59,19 @@ class Shell {
     for (const stmt of statements) {
       const trimmed = stmt.trim();
       if (!trimmed) continue;
+
+      // Check if this individual statement is a function definition
+      const funcDef = this._parseFunctionDef(trimmed);
+      if (funcDef) {
+        this.functions[funcDef.name] = { body: funcDef.body };
+        continue;
+      }
+
+      // Check if this statement is a control structure
+      if (this._isControlStructure(trimmed)) {
+        exitCode = await this._execControlStructure(trimmed, { stdout, stderr });
+        continue;
+      }
 
       // Handle && and ||
       const logicParts = this._splitLogic(trimmed);
@@ -94,8 +105,9 @@ class Shell {
         continue;
       }
 
-      // Expand variables per-command so prior commands (e.g. export) take effect
-      const expanded = this._expandVars(part);
+      // Expand variables and arithmetic per-command so prior commands take effect
+      let expanded = this._expandVars(part);
+      expanded = this._expandArithmetic(expanded);
       exitCode = await this._execPipeline(expanded, { stdout, stderr });
       this.lastExitCode = exitCode;
       i++;
@@ -326,12 +338,25 @@ class Shell {
           i += 2;
           continue;
         }
+        // Handle $@ $* $#
+        if (input[i + 1] === '@' || input[i + 1] === '*' || input[i + 1] === '#') {
+          result.push(this.vfs.env[input[i + 1]] || '');
+          i += 2;
+          continue;
+        }
+        // Handle positional parameters $0, $1, $2, ...
+        const digitMatch = input.slice(i).match(/^\$(\d+)/);
+        if (digitMatch) {
+          result.push(this.vfs.env[digitMatch[1]] || '');
+          i += digitMatch[0].length;
+          continue;
+        }
         // Handle ${VAR}
         if (input[i + 1] === '{') {
           const end = input.indexOf('}', i + 2);
           if (end !== -1) {
             const name = input.slice(i + 2, end);
-            if (/^[A-Za-z_]\w*$/.test(name)) {
+            if (/^[A-Za-z_]\w*$/.test(name) || /^\d+$/.test(name)) {
               result.push(this.vfs.env[name] || '');
               i = end + 1;
               continue;
@@ -443,10 +468,11 @@ class Shell {
   }
 
   _splitStatements(input) {
-    // Split on unquoted ;
+    // Split on unquoted ; (respecting quotes and braces)
     const result = [];
     let current = '';
     let inSingle = false, inDouble = false, escape = false;
+    let braceDepth = 0;
 
     for (let i = 0; i < input.length; i++) {
       const ch = input[i];
@@ -454,10 +480,14 @@ class Shell {
       if (ch === '\\') { escape = true; current += ch; continue; }
       if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; continue; }
       if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; continue; }
-      if (ch === ';' && !inSingle && !inDouble) {
-        result.push(current);
-        current = '';
-        continue;
+      if (!inSingle && !inDouble) {
+        if (ch === '{') { braceDepth++; current += ch; continue; }
+        if (ch === '}') { braceDepth--; current += ch; continue; }
+        if (ch === ';' && braceDepth === 0) {
+          result.push(current);
+          current = '';
+          continue;
+        }
       }
       current += ch;
     }
@@ -646,8 +676,22 @@ class Shell {
       else if (line === 'fi' || line.startsWith('fi ') || line.endsWith('; fi')) fiIdx = i;
     }
 
-    // Simple single-line format: if <condition>; then <command>; fi
+    // Simple single-line format: if <condition>; then <command>; [else <command>;] fi
     if (lines.length === 1) {
+      // Try with else first
+      const matchElse = lines[0].match(/^if\s+(.+?);\s*then\s+(.+?);\s*else\s+(.+?);\s*fi$/);
+      if (matchElse) {
+        const condition = matchElse[1];
+        const thenCmd = matchElse[2];
+        const elseCmd = matchElse[3];
+        const condResult = await this._evalCondition(condition, { stdout, stderr });
+        if (condResult === 0) {
+          return this._execLine(thenCmd, { stdout, stderr });
+        } else {
+          return this._execLine(elseCmd, { stdout, stderr });
+        }
+      }
+      // Without else
       const match = lines[0].match(/^if\s+(.+?);\s*then\s+(.+?);\s*fi$/);
       if (match) {
         const condition = match[1];
