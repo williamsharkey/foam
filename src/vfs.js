@@ -157,14 +157,16 @@ class VFS {
     });
   }
 
-  resolvePath(p) {
-    if (!p) return this.cwd;
+  resolvePath(p, base) {
+    if (!p) return base || this.cwd;
     // Handle ~ expansion
     if (p.startsWith('~')) {
       p = this.env.HOME + p.slice(1);
     }
     if (!p.startsWith('/')) {
-      p = this.cwd + '/' + p;
+      // Use provided base directory, or fall back to cwd
+      const baseDir = base || this.cwd;
+      p = baseDir + '/' + p;
     }
     // Normalize
     const parts = p.split('/');
