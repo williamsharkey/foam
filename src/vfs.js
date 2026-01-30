@@ -451,6 +451,10 @@ class VFS {
         },
         writeFile: async (p, data, opts) => {
           const str = typeof data === 'string' ? data : new TextDecoder().decode(data);
+          const parentPath = p.substring(0, p.lastIndexOf('/')) || '/';
+          if (parentPath !== '/' && !(await vfs.exists(parentPath))) {
+            await vfs.mkdir(parentPath, { recursive: true });
+          }
           await vfs.writeFile(p, str);
         },
         unlink: (p) => vfs.unlink(p),
