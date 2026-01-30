@@ -377,4 +377,149 @@ commands.curl = async (args, ctx) => {
   return commands.fetch(fetchArgs, ctx);
 };
 
+// ─── TEXT EDITOR (vi/nano-like) ─────────────────────────────────────────────
+
+commands.edit = async (args, { stdout, stderr, vfs, terminal }) => {
+  if (args.length === 0) {
+    stderr('Usage: edit <file>\n');
+    return 1;
+  }
+
+  const filename = args[0];
+
+  // Read existing file or create new
+  let content = '';
+  let isNewFile = false;
+  try {
+    content = await vfs.readFile(filename);
+  } catch (err) {
+    // New file
+    isNewFile = true;
+    content = '';
+  }
+
+  // Split into lines
+  let lines = content ? content.split('\n') : [''];
+
+  // Simple line-based editor interface
+  stdout('\x1b[2J\x1b[H'); // Clear screen
+  stdout(`\x1b[1;36m╔═══════════════════════════════════════════════════════════════╗\x1b[0m\n`);
+  stdout(`\x1b[1;36m║\x1b[0m  \x1b[1;97mFoam Text Editor\x1b[0m - ${filename} ${isNewFile ? '(new file)' : ''}\x1b[1;36m║\x1b[0m\n`);
+  stdout(`\x1b[1;36m╚═══════════════════════════════════════════════════════════════╝\x1b[0m\n\n`);
+
+  // Display content with line numbers
+  for (let i = 0; i < lines.length; i++) {
+    const lineNum = String(i + 1).padStart(4, ' ');
+    stdout(`\x1b[90m${lineNum} │\x1b[0m ${lines[i]}\n`);
+  }
+
+  stdout('\n');
+  stdout('\x1b[33mCommands:\x1b[0m\n');
+  stdout('  a <line> <text>  - Append text at line\n');
+  stdout('  i <line> <text>  - Insert text at line\n');
+  stdout('  d <line>         - Delete line\n');
+  stdout('  c <line> <text>  - Change line content\n');
+  stdout('  s                - Save and exit\n');
+  stdout('  q                - Quit without saving\n');
+  stdout('  p                - Print current content\n');
+  stdout('\n');
+  stdout('Enter command (or "s" to save): ');
+
+  // For now, provide a simple save mechanism
+  // In a real terminal, we'd enter interactive mode
+  // For Foam, we'll use a different approach with edit scripts
+
+  if (terminal && terminal.editorMode) {
+    // Future: Interactive mode with terminal input
+    return 0;
+  } else {
+    // Batch mode: return instructions
+    stdout('\n\n\x1b[33mNote:\x1b[0m For interactive editing, use edit scripts:\n');
+    stdout('  echo "line 1 content" > file.txt\n');
+    stdout('  echo "line 2 content" >> file.txt\n');
+    stdout('Or use the Edit tool in Spirit for direct file editing.\n');
+    return 0;
+  }
+};
+
+// Simplified editor commands that work in non-interactive mode
+commands.nano = async (args, ctx) => {
+  return commands.edit(args, ctx);
+};
+
+commands.vi = async (args, ctx) => {
+  return commands.edit(args, ctx);
+};
+
+// ─── ED - Line Editor (sed-like, scriptable) ────────────────────────────────
+
+commands.ed = async (args, { stdout, stderr, vfs }) => {
+  if (args.length === 0) {
+    stderr('Usage: ed <file> [commands]\n');
+    stderr('Commands:\n');
+    stderr('  <line>a <text>  - Append after line\n');
+    stderr('  <line>i <text>  - Insert before line\n');
+    stderr('  <line>d         - Delete line\n');
+    stderr('  <line>c <text>  - Change line\n');
+    stderr('  <line>s/<pattern>/<replacement>/  - Substitute\n');
+    stderr('  w               - Write (save)\n');
+    stderr('  p               - Print all\n');
+    stderr('  <line>p         - Print line\n');
+    stderr('\nExample: ed file.txt 1i "new first line" w\n');
+    return 1;
+  }
+
+  const filename = args[0];
+  const cmdArgs = args.slice(1);
+
+  // Load file
+  let lines = [];
+  try {
+    const content = await vfs.readFile(filename);
+    lines = content.split('\n');
+  } catch (err) {
+    // New file
+    lines = [''];
+  }
+
+  let modified = false;
+
+  // Process commands
+  for (let i = 0; i < cmdArgs.length; i++) {
+    const cmd = cmdArgs[i];
+
+    if (cmd === 'w' || cmd === 'wq') {
+      await vfs.writeFile(filename, lines.join('\n'));
+      stdout(`${lines.length} lines written\n`);
+      modified = false;
+      if (cmd === 'wq') break;
+    } else if (cmd === 'p') {
+      for (let j = 0; j < lines.length; j++) {
+        stdout(`${j + 1}: ${lines[j]}\n`);
+      }
+    } else if (/^\d+a$/.test(cmd)) {
+      const lineNum = parseInt(cmd);
+      const text = cmdArgs[++i] || '';
+      lines.splice(lineNum, 0, text);
+      modified = true;
+    } else if (/^\d+i$/.test(cmd)) {
+      const lineNum = parseInt(cmd);
+      const text = cmdArgs[++i] || '';
+      lines.splice(lineNum - 1, 0, text);
+      modified = true;
+    } else if (/^\d+d$/.test(cmd)) {
+      const lineNum = parseInt(cmd);
+      lines.splice(lineNum - 1, 1);
+      modified = true;
+    } else if (/^\d+c$/.test(cmd)) {
+      const lineNum = parseInt(cmd);
+      const text = cmdArgs[++i] || '';
+      lines[lineNum - 1] = text;
+      modified = true;
+    }
+  }
+
+  return 0;
+};
+
 export default commands;

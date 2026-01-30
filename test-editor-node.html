@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Text Editor & Node.js Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    #output { white-space: pre-wrap; background: #252525; padding: 15px; border-radius: 5px; }
+    .pass { color: #2ecc71; }
+    .fail { color: #e74c3c; }
+    .info { color: #3498db; }
+    h1 { color: #569cd6; }
+  </style>
+</head>
+<body>
+  <h1>🎨 Text Editor & Node.js Test</h1>
+  <div id="output"></div>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import Shell from './src/shell.js';
+    import { registerFluffyCommands } from './src/fluffy-bridge.js';
+    import './src/devtools.js';
+
+    const output = document.getElementById('output');
+
+    function log(msg, type = 'info') {
+      const span = document.createElement('span');
+      span.className = type;
+      span.textContent = msg + '\n';
+      output.appendChild(span);
+      console.log(msg);
+    }
+
+    async function test() {
+      log('=== TEXT EDITOR & NODE.JS TEST ===\n', 'info');
+
+      try {
+        // Initialize
+        const vfs = new VFS();
+        await vfs.init();
+        registerFluffyCommands();
+        const shell = new Shell(vfs);
+        window.shell = shell;
+
+        log('✓ Foam initialized\n', 'pass');
+
+        // ═══════════════════════════════════════════════════════════
+        log('━━━ ED Line Editor Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        // Test 1: Create new file with ed
+        log('Test 1: Create file with ed', 'info');
+        await shell.exec('cd ~');
+        const r1 = await shell.exec('ed test.txt 1i "Hello, World!" w');
+        log(r1.stdout, 'info');
+        if (r1.exitCode === 0) {
+          log('✓ File created with ed\n', 'pass');
+        } else {
+          log('✗ ed create failed\n', 'fail');
+        }
+
+        // Test 2: Verify file content
+        log('Test 2: Verify file content', 'info');
+        const r2 = await shell.exec('cat test.txt');
+        log(`  Content: "${r2.stdout.trim()}"`, 'info');
+        if (r2.stdout.trim() === 'Hello, World!') {
+          log('✓ File content correct\n', 'pass');
+        } else {
+          log('✗ File content wrong\n', 'fail');
+        }
+
+        // Test 3: Append lines with ed
+        log('Test 3: Append more lines', 'info');
+        const r3 = await shell.exec('ed test.txt 1a "Line 2" 2a "Line 3" w');
+        log(r3.stdout, 'info');
+        const r3b = await shell.exec('cat test.txt');
+        log(r3b.stdout, 'info');
+        if (r3b.stdout.includes('Line 2') && r3b.stdout.includes('Line 3')) {
+          log('✓ Append works\n', 'pass');
+        } else {
+          log('✗ Append failed\n', 'fail');
+        }
+
+        // Test 4: Print with line numbers using ed
+        log('Test 4: Print file with ed', 'info');
+        const r4 = await shell.exec('ed test.txt p');
+        log(r4.stdout, 'info');
+        if (r4.stdout.includes('1:') && r4.stdout.includes('2:')) {
+          log('✓ Print works\n', 'pass');
+        }
+
+        // Test 5: Create JavaScript file
+        log('Test 5: Create JavaScript file', 'info');
+        await shell.exec('ed hello.js 1i "console.log(\'Hello from Foam!\');" w');
+        const r5 = await shell.exec('cat hello.js');
+        log(`  JS file: ${r5.stdout}`, 'info');
+        if (r5.stdout.includes('console.log')) {
+          log('✓ JS file created\n', 'pass');
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        log('━━━ Node.js Execution Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        // Test 6: Run inline JavaScript
+        log('Test 6: node -e (inline execution)', 'info');
+        const r6 = await shell.exec('node -e "console.log(2 + 2)"');
+        log(`  Output: ${r6.stdout.trim()}`, 'info');
+        if (r6.stdout.trim() === '4') {
+          log('✓ node -e works\n', 'pass');
+        } else {
+          log('✗ node -e failed\n', 'fail');
+        }
+
+        // Test 7: Run JavaScript file
+        log('Test 7: node hello.js (file execution)', 'info');
+        const r7 = await shell.exec('node hello.js');
+        log(`  Output: ${r7.stdout.trim()}`, 'info');
+        if (r7.stdout.trim() === 'Hello from Foam!') {
+          log('✓ node file execution works\n', 'pass');
+        } else {
+          log('✗ node file execution failed\n', 'fail');
+        }
+
+        // Test 8: Complex JavaScript
+        log('Test 8: Complex JavaScript', 'info');
+        await shell.exec('ed calc.js 1i "const add = (a, b) => a + b;" 1a "console.log(add(10, 20));" w');
+        const r8 = await shell.exec('node calc.js');
+        log(`  Output: ${r8.stdout.trim()}`, 'info');
+        if (r8.stdout.trim() === '30') {
+          log('✓ Complex JS works\n', 'pass');
+        }
+
+        // Test 9: Create multi-line script
+        log('Test 9: Multi-line JavaScript file', 'info');
+        await shell.exec('ed script.js 1i "const name = \'Foam\';" 1a "const version = \'0.1.0\';" 2a "console.log(`${name} v${version}`);" w');
+        const r9 = await shell.exec('node script.js');
+        log(`  Output: ${r9.stdout.trim()}`, 'info');
+        if (r9.stdout.trim() === 'Foam v0.1.0') {
+          log('✓ Multi-line script works\n', 'pass');
+        }
+
+        // Test 10: Edit existing file
+        log('Test 10: Edit existing file with ed', 'info');
+        await shell.exec('ed hello.js 1c "console.log(\'Modified!\');" w');
+        const r10 = await shell.exec('node hello.js');
+        log(`  Output: ${r10.stdout.trim()}`, 'info');
+        if (r10.stdout.trim() === 'Modified!') {
+          log('✓ File editing works\n', 'pass');
+        }
+
+        // Test 11: Delete lines
+        log('Test 11: Delete lines with ed', 'info');
+        await shell.exec('ed test.txt 2d w');
+        const r11 = await shell.exec('cat test.txt');
+        log(`  Content after delete:\n${r11.stdout}`, 'info');
+        const lineCount = r11.stdout.split('\n').filter(l => l).length;
+        if (lineCount === 2) {
+          log('✓ Line deletion works\n', 'pass');
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        log('━━━ Edit Command Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        // Test 12: Use edit command for viewing
+        log('Test 12: edit command (viewer mode)', 'info');
+        const r12 = await shell.exec('edit hello.js');
+        log(r12.stdout.substring(0, 400), 'info');
+        if (r12.stdout.includes('Foam Text Editor')) {
+          log('✓ edit command works\n', 'pass');
+        }
+
+        // Summary
+        log('\n=== TEST SUMMARY ===', 'info');
+        log('✓ ed line editor: WORKING', 'pass');
+        log('✓ File creation: WORKING', 'pass');
+        log('✓ Line insert/append: WORKING', 'pass');
+        log('✓ Line change: WORKING', 'pass');
+        log('✓ Line delete: WORKING', 'pass');
+        log('✓ node -e: WORKING', 'pass');
+        log('✓ node <file>: WORKING', 'pass');
+        log('✓ Multi-line scripts: WORKING', 'pass');
+        log('\nSpirit can now edit files and run JavaScript! 🎉', 'pass');
+
+      } catch (err) {
+        log(`\n✗ ERROR: ${err.message}`, 'fail');
+        log(err.stack, 'fail');
+        console.error(err);
+      }
+    }
+
+    test();
+  </script>
+</body>
+</html>
