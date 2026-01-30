@@ -30,9 +30,26 @@ async function listAllFiles(vfs, dir, base) {
   return files;
 }
 
+function parseGitRemoteArgs(args, vfs) {
+  let remote = 'origin';
+  let ref = '';
+  const positional = [];
+  for (let i = 1; i < args.length; i++) {
+    if (!args[i].startsWith('-')) positional.push(args[i]);
+  }
+  if (positional.length >= 1) remote = positional[0];
+  if (positional.length >= 2) ref = positional[1];
+
+  const token = vfs.env['GITHUB_TOKEN']
+    || (typeof localStorage !== 'undefined' ? localStorage.getItem('foam_github_token') || '' : '');
+  const corsProxy = vfs.env['GIT_CORS_PROXY'] || 'https://cors.isomorphic-git.org';
+
+  return { remote, ref, token, corsProxy };
+}
+
 commands.git = async (args, { stdout, stderr, vfs }) => {
   if (args.length === 0) {
-    stdout('usage: git <command> [<args>]\n\nAvailable commands:\n  init, add, commit, status, log, diff, branch, checkout, clone\n');
+    stdout('usage: git <command> [<args>]\n\nAvailable commands:\n  init, add, commit, status, log, diff, branch, checkout, clone\n  push, pull, fetch, remote, merge\n');
     return 0;
   }
 
@@ -302,6 +319,109 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
         }
 
         stdout('done.\n');
+        break;
+      }
+
+      case 'remote': {
+        const remoteSub = args[1];
+        if (!remoteSub || remoteSub === '-v') {
+          const remotes = await git.listRemotes({ fs: fs, dir });
+          for (const r of remotes) {
+            if (remoteSub === '-v') {
+              stdout(`${r.remote}\t${r.url} (fetch)\n`);
+              stdout(`${r.remote}\t${r.url} (push)\n`);
+            } else {
+              stdout(`${r.remote}\n`);
+            }
+          }
+        } else if (remoteSub === 'add') {
+          const name = args[2], url = args[3];
+          if (!name || !url) { stderr('usage: git remote add <name> <url>\n'); return 1; }
+          await git.addRemote({ fs: fs, dir, remote: name, url });
+        } else if (remoteSub === 'remove' || remoteSub === 'rm') {
+          const name = args[2];
+          if (!name) { stderr('usage: git remote remove <name>\n'); return 1; }
+          await git.deleteRemote({ fs: fs, dir, remote: name });
+        } else {
+          stderr(`git remote: '${remoteSub}' is not a valid subcommand\n`);
+          return 1;
+        }
+        break;
+      }
+
+      case 'push': {
+        const { remote, ref, token, corsProxy } = parseGitRemoteArgs(args, vfs);
+        if (!token) {
+          stderr('error: authentication required\nSet GITHUB_TOKEN or run: export GITHUB_TOKEN=ghp_...\n');
+          return 1;
+        }
+        const currentBranch = ref || await git.currentBranch({ fs: fs, dir }) || 'main';
+        stdout(`Pushing to ${remote}/${currentBranch}...\n`);
+        await git.push({
+          fs: fs, http, dir,
+          remote,
+          ref: currentBranch,
+          corsProxy,
+          onAuth: () => ({ username: token }),
+        });
+        stdout('done.\n');
+        break;
+      }
+
+      case 'fetch': {
+        const { remote, token, corsProxy } = parseGitRemoteArgs(args, vfs);
+        if (!token) {
+          stderr('error: authentication required\nSet GITHUB_TOKEN or run: export GITHUB_TOKEN=ghp_...\n');
+          return 1;
+        }
+        stdout(`Fetching from ${remote}...\n`);
+        await git.fetch({
+          fs: fs, http, dir,
+          remote,
+          corsProxy,
+          onAuth: () => ({ username: token }),
+        });
+        stdout('done.\n');
+        break;
+      }
+
+      case 'pull': {
+        const { remote, ref, token, corsProxy } = parseGitRemoteArgs(args, vfs);
+        if (!token) {
+          stderr('error: authentication required\nSet GITHUB_TOKEN or run: export GITHUB_TOKEN=ghp_...\n');
+          return 1;
+        }
+        const currentBranch = ref || await git.currentBranch({ fs: fs, dir }) || 'main';
+        stdout(`Pulling from ${remote}/${currentBranch}...\n`);
+        await git.pull({
+          fs: fs, http, dir,
+          remote,
+          ref: currentBranch,
+          corsProxy,
+          singleBranch: true,
+          author: { name: vfs.env.USER || 'user', email: 'user@foam.local' },
+          onAuth: () => ({ username: token }),
+        });
+        stdout('done.\n');
+        break;
+      }
+
+      case 'merge': {
+        const theirs = args[1];
+        if (!theirs) { stderr('usage: git merge <branch>\n'); return 1; }
+        const mergeResult = await git.merge({
+          fs: fs, dir,
+          ours: await git.currentBranch({ fs: fs, dir }) || 'main',
+          theirs,
+          author: { name: vfs.env.USER || 'user', email: 'user@foam.local' },
+        });
+        if (mergeResult.alreadyMerged) {
+          stdout('Already up to date.\n');
+        } else if (mergeResult.fastForward) {
+          stdout(`Fast-forward merge to ${mergeResult.oid?.slice(0, 7)}\n`);
+        } else {
+          stdout(`Merge made by the 'recursive' strategy. ${mergeResult.oid?.slice(0, 7)}\n`);
+        }
         break;
       }
 
