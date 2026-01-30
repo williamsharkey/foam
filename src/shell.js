@@ -295,9 +295,63 @@ class Shell {
   }
 
   _expandVars(input) {
-    return input.replace(/\$\{([A-Za-z_]\w*)\}/g, (_, name) => this.vfs.env[name] || '')
-                .replace(/\$([A-Za-z_]\w*)/g, (_, name) => this.vfs.env[name] || '')
-                .replace(/\$\?/g, String(this.lastExitCode));
+    // Expand variables while respecting single quotes (no expansion inside single quotes)
+    const result = [];
+    let i = 0;
+    let inSingle = false;
+    let inDouble = false;
+
+    while (i < input.length) {
+      const ch = input[i];
+
+      // Track quote state
+      if (ch === "'" && !inDouble) {
+        inSingle = !inSingle;
+        result.push(ch);
+        i++;
+        continue;
+      }
+      if (ch === '"' && !inSingle) {
+        inDouble = !inDouble;
+        result.push(ch);
+        i++;
+        continue;
+      }
+
+      // Only expand variables outside single quotes
+      if (!inSingle && ch === '$') {
+        // Handle $?
+        if (input[i + 1] === '?') {
+          result.push(String(this.lastExitCode));
+          i += 2;
+          continue;
+        }
+        // Handle ${VAR}
+        if (input[i + 1] === '{') {
+          const end = input.indexOf('}', i + 2);
+          if (end !== -1) {
+            const name = input.slice(i + 2, end);
+            if (/^[A-Za-z_]\w*$/.test(name)) {
+              result.push(this.vfs.env[name] || '');
+              i = end + 1;
+              continue;
+            }
+          }
+        }
+        // Handle $VAR
+        const match = input.slice(i).match(/^\$([A-Za-z_]\w*)/);
+        if (match) {
+          result.push(this.vfs.env[match[1]] || '');
+          i += match[0].length;
+          continue;
+        }
+      }
+
+      result.push(ch);
+      i++;
+    }
+
+    return result.join('');
   }
 
   async _expandCommandSubstitution(input, stderr) {
