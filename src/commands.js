@@ -1101,7 +1101,6 @@ commands.spirit = async (args, { stdout, stderr, vfs }) => {
     return 0;
   } catch (e) {
     stderr(`spirit: ${e.message || e}\n`);
-    if (e.stack) stderr(`${e.stack}\n`);
     return 1;
   }
 };
