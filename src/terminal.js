@@ -13,10 +13,94 @@ class Terminal {
     this.promptStr = '';
     this.inputCallback = null; // For readFromUser
     this.abortController = null;
+    this.rawModeCallback = null; // For vi/interactive editors
 
     this._build();
     this._updatePrompt();
     this.focus();
+  }
+
+  /**
+   * Enter raw mode - all keystrokes go directly to the callback.
+   * Used by interactive commands like vi that need character-by-character input.
+   */
+  enterRawMode(callback) {
+    this.rawModeCallback = callback;
+    this.input.style.display = 'none';
+    this.promptEl.style.display = 'none';
+    // Create a hidden input to capture keystrokes
+    if (!this.rawInput) {
+      this.rawInput = document.createElement('input');
+      this.rawInput.style.cssText = 'position:absolute;left:-9999px;';
+      this.container.appendChild(this.rawInput);
+      this.rawInput.addEventListener('keydown', (e) => this._onRawKey(e));
+    }
+    this.rawInput.focus();
+  }
+
+  /**
+   * Exit raw mode - return to normal line-editing mode.
+   */
+  exitRawMode() {
+    this.rawModeCallback = null;
+    this.input.style.display = '';
+    this.promptEl.style.display = '';
+    this.focus();
+  }
+
+  /**
+   * Check if terminal is in raw mode.
+   */
+  isRawMode() {
+    return this.rawModeCallback !== null;
+  }
+
+  /**
+   * Get terminal dimensions (approximate based on container size).
+   */
+  getSize() {
+    // Estimate based on font size and container
+    const fontSize = 14;
+    const lineHeight = 1.3;
+    const charWidth = fontSize * 0.6; // Approximate monospace width
+    const charHeight = fontSize * lineHeight;
+    const rows = Math.floor(this.container.clientHeight / charHeight) || 24;
+    const cols = Math.floor(this.container.clientWidth / charWidth) || 80;
+    return { rows, cols };
+  }
+
+  _onRawKey(e) {
+    if (!this.rawModeCallback) return;
+    e.preventDefault();
+
+    let key = e.key;
+    // Normalize key names to match Shiro's raw mode
+    if (e.ctrlKey && e.key.length === 1) {
+      key = 'Ctrl+' + e.key.toUpperCase();
+    } else if (e.key === 'ArrowUp') {
+      key = 'ArrowUp';
+    } else if (e.key === 'ArrowDown') {
+      key = 'ArrowDown';
+    } else if (e.key === 'ArrowLeft') {
+      key = 'ArrowLeft';
+    } else if (e.key === 'ArrowRight') {
+      key = 'ArrowRight';
+    } else if (e.key === 'Backspace') {
+      key = 'Backspace';
+    } else if (e.key === 'Delete') {
+      key = 'Delete';
+    } else if (e.key === 'Home') {
+      key = 'Home';
+    } else if (e.key === 'End') {
+      key = 'End';
+    } else if (e.key === 'Tab') {
+      key = 'Tab';
+    }
+    // Enter and Escape are already correct
+
+    this.rawModeCallback(key);
+    // Re-focus to keep capturing
+    this.rawInput.focus();
   }
 
   _build() {
@@ -70,6 +154,11 @@ class Terminal {
     span.innerHTML = this._ansiToHtml(text);
     this.output.appendChild(span);
     this._scroll();
+  }
+
+  // Alias for compatibility with Shiro's terminal API
+  writeOutput(text) {
+    this.write(text);
   }
 
   writeLine(text) {
