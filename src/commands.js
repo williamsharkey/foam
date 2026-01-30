@@ -1026,21 +1026,16 @@ commands.spirit = async (args, { stdout, stderr, vfs }) => {
       '  # or',
       '  export ANTHROPIC_API_KEY=sk-ant-your-key-here',
       '',
-      '  spirit "your prompt here"',
+      '  spirit                          # interactive mode',
+      '  spirit "your prompt here"       # one-shot mode',
       '',
       'Spirit uses Claude to read, write, and edit files',
       'in your Foam filesystem with access to all shell commands.',
       '',
-      'Slash commands: /help, /clear, /model, /stats, /thinking, /cost',
+      'Slash commands: /help, /clear, /model, /stats, /thinking, /cost, /exit',
       '',
     ].join('\n'));
     return 1;
-  }
-
-  if (!prompt) {
-    stdout('Usage: spirit "your message"\n');
-    stdout('Spirit slash commands: /help, /clear, /compact, /stats\n');
-    return 0;
   }
 
   // Get or create Spirit agent from global state
@@ -1087,17 +1082,57 @@ commands.spirit = async (args, { stdout, stderr, vfs }) => {
       onError: (error) => stderr(`\x1b[31mError: ${error.message}\x1b[0m\n`),
     });
 
-    // Handle slash commands
-    if (prompt.startsWith('/')) {
-      const { handled, output } = await agent.handleSlashCommand(prompt);
-      if (handled) {
-        if (output) stdout(output + '\n');
-        return 0;
+    // One-shot mode: prompt provided as argument
+    if (prompt) {
+      if (prompt.startsWith('/')) {
+        const { handled, output } = await agent.handleSlashCommand(prompt);
+        if (handled) {
+          if (output) stdout(output + '\n');
+          return 0;
+        }
+      }
+      await agent.run(prompt);
+      stdout('\n');
+      return 0;
+    }
+
+    // Interactive REPL mode
+    stdout('\x1b[1;95mSpirit\x1b[0m — AI Coding Agent\n');
+    stdout('\x1b[90mType your prompt, /help for commands, /exit to quit.\x1b[0m\n\n');
+
+    while (true) {
+      const input = await foam.provider.readFromUser('\x1b[95mspirit>\x1b[0m');
+      const trimmed = (input || '').trim();
+
+      // Empty input (Ctrl+C) or /exit exits the REPL
+      if (trimmed === '' || trimmed === '/exit' || trimmed === '/quit') {
+        stdout('\n');
+        break;
+      }
+
+      // Handle slash commands
+      if (trimmed.startsWith('/')) {
+        try {
+          const { handled, output } = await agent.handleSlashCommand(trimmed);
+          if (handled) {
+            stdout(output + '\n\n');
+            continue;
+          }
+        } catch (e) {
+          stderr(`\x1b[31mError: ${e.message || e}\x1b[0m\n`);
+          continue;
+        }
+      }
+
+      // Run the prompt through the agent
+      try {
+        await agent.run(trimmed);
+        stdout('\n');
+      } catch (e) {
+        stderr(`\x1b[31mError: ${e.message || e}\x1b[0m\n`);
       }
     }
 
-    await agent.run(prompt);
-    stdout('\n');
     return 0;
   } catch (e) {
     stderr(`spirit: ${e.message || e}\n`);

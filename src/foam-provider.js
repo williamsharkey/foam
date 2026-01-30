@@ -124,6 +124,19 @@ class FoamProvider {
     return {
       name: 'Foam',
       version: '0.1.0',
+      capabilities: {
+        runtimes: ['node', 'python'],
+        buildTools: ['esbuild'],
+        packageManagers: ['npm', 'pip'],
+        git: true,
+        extraCommands: ['npx'],
+        fsRoots: ['/'],
+        notes: [
+          'All runtimes execute in-browser via virtual implementations.',
+          'npm install fetches packages from CDN (esm.sh/unpkg).',
+          'git clone uses isomorphic-git with a CORS proxy.',
+        ],
+      },
     };
   }
 }

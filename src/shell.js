@@ -51,8 +51,8 @@ class Shell {
     // Expand arithmetic $((...))
     input = this._expandArithmetic(input);
 
-    // Expand variables
-    input = this._expandVars(input);
+    // Note: variable expansion is deferred to per-command execution
+    // in _execLogicChain so that `export X=1 && echo $X` works correctly.
 
     // Split on ; (respecting quotes)
     const statements = this._splitStatements(input);
@@ -94,7 +94,9 @@ class Shell {
         continue;
       }
 
-      exitCode = await this._execPipeline(part, { stdout, stderr });
+      // Expand variables per-command so prior commands (e.g. export) take effect
+      const expanded = this._expandVars(part);
+      exitCode = await this._execPipeline(expanded, { stdout, stderr });
       this.lastExitCode = exitCode;
       i++;
     }
