@@ -191,8 +191,19 @@ class VFS {
 
   async readFile(path) {
     path = this.resolvePath(path);
-    const inode = await this._get(path);
+    let inode = await this._get(path);
     if (!inode) throw fsError('ENOENT', `ENOENT: no such file or directory, open '${path}'`);
+
+    // Follow symlinks
+    let maxFollows = 10; // Prevent infinite loops
+    while (inode.type === 'symlink' && maxFollows-- > 0) {
+      const target = inode.symlinkTarget || inode.content;
+      const targetPath = target.startsWith('/') ? target : this.resolvePath(target, path.substring(0, path.lastIndexOf('/')));
+      inode = await this._get(targetPath);
+      if (!inode) throw fsError('ENOENT', `ENOENT: no such file or directory, open '${targetPath}'`);
+    }
+    if (inode.type === 'symlink') throw new Error('Too many levels of symbolic links');
+
     if (inode.type === 'dir') throw fsError('EISDIR', `EISDIR: illegal operation on a directory, read`);
     inode.atime = Date.now();
     await this._put(inode);

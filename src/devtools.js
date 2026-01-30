@@ -9,6 +9,15 @@ let http = null;
 
 async function loadGit() {
   if (git) return;
+
+  // Check for pre-loaded isomorphic-git (for Node.js/linkedom testing)
+  if (typeof globalThis.__isomorphicGit !== 'undefined') {
+    git = globalThis.__isomorphicGit;
+    http = globalThis.__isomorphicGitHttp || null;
+    return;
+  }
+
+  // Browser: load from esm.sh CDN
   const mod = await import('https://esm.sh/isomorphic-git@1.27.1');
   git = mod.default;
   const httpMod = await import('https://esm.sh/isomorphic-git@1.27.1/http/web');
