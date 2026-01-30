@@ -58,7 +58,7 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
         } catch (e) {
           // Ignore if already exists
         }
-        await git.init({ fs, dir });
+        await git.init({ fs, dir, defaultBranch: 'main' });
         stdout(`Initialized empty Git repository in ${dir}/.git/\n`);
         break;
       }
@@ -760,8 +760,239 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
   }
 
   // Helper to load and execute a CommonJS module (synchronous after pre-caching)
+  // Built-in Node.js module shims
+  function getBuiltinModule(name) {
+    switch (name) {
+      case 'path':
+      case 'node:path': return {
+        join: (...parts) => parts.join('/').replace(/\/+/g, '/'),
+        resolve: (...parts) => {
+          let p = parts.reduce((a, b) => b.startsWith('/') ? b : a + '/' + b);
+          return vfs.resolvePath(p);
+        },
+        dirname: (p) => p.substring(0, p.lastIndexOf('/')) || '/',
+        basename: (p, ext) => { const base = p.split('/').pop() || ''; return ext && base.endsWith(ext) ? base.slice(0, -ext.length) : base; },
+        extname: (p) => { const m = p.match(/\.[^./]+$/); return m ? m[0] : ''; },
+        isAbsolute: (p) => p.startsWith('/'),
+        normalize: (p) => vfs.resolvePath(p),
+        relative: (from, to) => {
+          const f = from.split('/').filter(Boolean), t = to.split('/').filter(Boolean);
+          let i = 0; while (i < f.length && i < t.length && f[i] === t[i]) i++;
+          return [...Array(f.length - i).fill('..'), ...t.slice(i)].join('/') || '.';
+        },
+        sep: '/', delimiter: ':',
+        parse: (p) => ({ root: p.startsWith('/') ? '/' : '', dir: p.substring(0, p.lastIndexOf('/')), base: p.split('/').pop() || '', ext: (p.match(/\.[^./]+$/) || [''])[0], name: (p.split('/').pop() || '').replace(/\.[^.]+$/, '') }),
+        format: (obj) => (obj.dir ? obj.dir + '/' : '') + (obj.base || obj.name + (obj.ext || '')),
+      };
+      case 'fs':
+      case 'node:fs': {
+        const _r = (p) => vfs.resolvePath(typeof p === 'string' ? p : String(p));
+        const _readSync = (p, opts) => {
+          const resolved = _r(p);
+          const cached = fileCache.get(resolved) ?? fileCache.get(resolved + '.js');
+          if (cached !== undefined) return cached;
+          throw new Error(`ENOENT: no such file or directory, open '${p}'`);
+        };
+        const _existsSync = (p) => {
+          const resolved = _r(p);
+          return fileCache.has(resolved) || fileCache.has(resolved + '.js') || fileCache.has(resolved + '/index.js');
+        };
+        const _statSync = (p) => {
+          const resolved = _r(p);
+          const isFile = fileCache.has(resolved);
+          const isDir = [...fileCache.keys()].some(k => k.startsWith(resolved + '/'));
+          if (!isFile && !isDir) throw new Error(`ENOENT: no such file or directory, stat '${p}'`);
+          return { isFile: () => isFile, isDirectory: () => isDir && !isFile, isSymbolicLink: () => false, size: isFile ? (fileCache.get(resolved) || '').length : 0, mtime: new Date(), mode: 0o644 };
+        };
+        const _readdirSync = (p, opts) => {
+          const resolved = _r(p);
+          const prefix = resolved === '/' ? '/' : resolved + '/';
+          const entries = new Set();
+          for (const key of fileCache.keys()) { if (key.startsWith(prefix)) { const first = key.slice(prefix.length).split('/')[0]; if (first) entries.add(first); } }
+          const names = [...entries].sort();
+          if (opts && opts.withFileTypes) {
+            return names.map(name => {
+              const full = resolved + '/' + name;
+              const isDir = [...fileCache.keys()].some(k => k.startsWith(full + '/'));
+              return { name, isFile: () => !isDir, isDirectory: () => isDir, isSymbolicLink: () => false };
+            });
+          }
+          return names;
+        };
+        const _writeSync = (p, data) => {
+          const resolved = _r(p);
+          const content = typeof data === 'string' ? data : String(data);
+          fileCache.set(resolved, content);
+          vfs.writeFile(resolved, content); // fire-and-forget async
+        };
+        const _mkdirSync = (p, opts) => { vfs.mkdir(_r(p), opts); };
+        const _unlinkSync = (p) => { fileCache.delete(_r(p)); vfs.unlink(_r(p)); };
+        const _appendSync = (p, data) => {
+          const resolved = _r(p);
+          const content = (fileCache.get(resolved) || '') + (typeof data === 'string' ? data : String(data));
+          fileCache.set(resolved, content);
+          vfs.writeFile(resolved, content);
+        };
+        const fsShim = {
+          readFileSync: _readSync,
+          writeFileSync: _writeSync,
+          existsSync: _existsSync,
+          statSync: _statSync,
+          lstatSync: _statSync,
+          readdirSync: _readdirSync,
+          mkdirSync: _mkdirSync,
+          unlinkSync: _unlinkSync,
+          appendFileSync: _appendSync,
+          copyFileSync: (src, dest) => _writeSync(dest, _readSync(src, 'utf8')),
+          renameSync: (o, n) => { vfs.rename(_r(o), _r(n)); },
+          rmdirSync: (p) => { vfs.rmdir(_r(p), { recursive: true }); },
+          rmSync: (p, opts) => { if (opts && opts.recursive) vfs.rmdir(_r(p), { recursive: true }); else _unlinkSync(p); },
+          chmodSync: () => {},
+          accessSync: (p) => { if (!_existsSync(p)) throw new Error(`ENOENT: no such file or directory, access '${p}'`); },
+          constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
+          // Callback-style methods
+          readFile: (p, opts, cb) => { if (typeof opts === 'function') { cb = opts; opts = undefined; } try { cb(null, _readSync(p, opts)); } catch (e) { cb(e); } },
+          writeFile: (p, data, opts, cb) => { if (typeof opts === 'function') { cb = opts; } try { _writeSync(p, data); if (cb) cb(null); } catch (e) { if (cb) cb(e); } },
+          stat: (p, cb) => { try { cb(null, _statSync(p)); } catch (e) { cb(e); } },
+          lstat: (p, cb) => { try { cb(null, _statSync(p)); } catch (e) { cb(e); } },
+          readdir: (p, opts, cb) => { if (typeof opts === 'function') { cb = opts; opts = undefined; } try { cb(null, _readdirSync(p, opts)); } catch (e) { cb(e); } },
+          exists: (p, cb) => { cb(_existsSync(p)); },
+          mkdir: (p, opts, cb) => { if (typeof opts === 'function') { cb = opts; opts = undefined; } vfs.mkdir(_r(p), opts).then(() => cb && cb(null)).catch(e => cb && cb(e)); },
+          unlink: (p, cb) => { vfs.unlink(_r(p)).then(() => cb && cb(null)).catch(e => cb && cb(e)); },
+          createReadStream: (p) => {
+            const content = _readSync(p, 'utf8');
+            const handlers = {};
+            const stream = { on: (ev, fn) => { handlers[ev] = fn; return stream; }, pipe: (d) => d };
+            setTimeout(() => { if (handlers.data) handlers.data(content); if (handlers.end) handlers.end(); }, 0);
+            return stream;
+          },
+          createWriteStream: (p) => {
+            let buf = '';
+            return { write: (d) => { buf += d; return true; }, end: (d) => { if (d) buf += d; _writeSync(p, buf); }, on: () => ({}) };
+          },
+          promises: {
+            readFile: async (p, opts) => await vfs.readFile(_r(p)),
+            writeFile: async (p, data) => await vfs.writeFile(_r(p), typeof data === 'string' ? data : String(data)),
+            readdir: async (p, opts) => {
+              const entries = await vfs.readdir(_r(p));
+              if (opts && opts.withFileTypes) return entries.map(e => ({ name: e.name, isFile: () => e.type === 'file', isDirectory: () => e.type === 'dir', isSymbolicLink: () => false }));
+              return entries.map(e => e.name);
+            },
+            stat: async (p) => { const s = await vfs.stat(_r(p)); return { isFile: () => s.type === 'file', isDirectory: () => s.type === 'dir', isSymbolicLink: () => false, size: s.size, mtime: new Date(s.mtime) }; },
+            lstat: async (p) => { const s = await vfs.stat(_r(p)); return { isFile: () => s.type === 'file', isDirectory: () => s.type === 'dir', isSymbolicLink: () => false, size: s.size, mtime: new Date(s.mtime) }; },
+            mkdir: async (p, opts) => await vfs.mkdir(_r(p), opts),
+            unlink: async (p) => await vfs.unlink(_r(p)),
+            rm: async (p, opts) => { if (opts && opts.recursive) await vfs.rmdir(_r(p), { recursive: true }); else await vfs.unlink(_r(p)); },
+            access: async (p) => { if (!(await vfs.exists(_r(p)))) throw new Error(`ENOENT: ${p}`); },
+            rename: async (o, n) => await vfs.rename(_r(o), _r(n)),
+            copyFile: async (s, d) => { const c = await vfs.readFile(_r(s)); await vfs.writeFile(_r(d), c); },
+            appendFile: async (p, data) => { const old = await vfs.readFile(_r(p)).catch(() => ''); await vfs.writeFile(_r(p), old + data); },
+          },
+        };
+        return fsShim;
+      }
+      case 'child_process':
+      case 'node:child_process': {
+        const _shell = globalThis.__foam && globalThis.__foam.shell;
+        return {
+          execSync: (cmd, opts) => {
+            // Browser can't truly block. Use cached result pattern for simple cases.
+            if (!_shell) throw new Error('child_process: shell not available');
+            // Return empty string synchronously, queue the real exec
+            // Most Node.js test runners use async exec() instead
+            let result = '';
+            _shell.exec(typeof cmd === 'string' ? cmd : cmd.join(' ')).then(r => { result = r.stdout; });
+            return result;
+          },
+          exec: (cmd, opts, cb) => {
+            if (typeof opts === 'function') { cb = opts; opts = {}; }
+            if (!_shell) { if (cb) cb(new Error('child_process: shell not available')); return; }
+            _shell.exec(typeof cmd === 'string' ? cmd : cmd.join(' ')).then(r => {
+              if (r.exitCode !== 0) {
+                const err = new Error(`Command failed: ${cmd}`);
+                err.code = r.exitCode; err.stderr = r.stderr;
+                if (cb) cb(err, r.stdout, r.stderr);
+              } else {
+                if (cb) cb(null, r.stdout, r.stderr);
+              }
+            }).catch(e => { if (cb) cb(e); });
+          },
+          spawnSync: (cmd, spawnArgs) => {
+            return { stdout: '', stderr: '', status: 0, error: null };
+          },
+          spawn: (cmd, spawnArgs, opts) => {
+            const fullCmd = [cmd, ...(spawnArgs || [])].join(' ');
+            const handlers = {};
+            const child = {
+              on: (ev, fn) => { handlers[ev] = fn; return child; },
+              stdout: { on: (ev, fn) => { if (ev === 'data') handlers._stdoutData = fn; return child.stdout; }, pipe: () => child.stdout },
+              stderr: { on: (ev, fn) => { if (ev === 'data') handlers._stderrData = fn; return child.stderr; }, pipe: () => child.stderr },
+              stdin: { write: () => {}, end: () => {} },
+              pid: Math.floor(Math.random() * 10000),
+              kill: () => {},
+            };
+            if (_shell) {
+              _shell.exec(fullCmd).then(r => {
+                if (handlers._stdoutData && r.stdout) handlers._stdoutData(r.stdout);
+                if (handlers._stderrData && r.stderr) handlers._stderrData(r.stderr);
+                if (handlers.close) handlers.close(r.exitCode);
+                if (handlers.exit) handlers.exit(r.exitCode);
+              }).catch(e => { if (handlers.error) handlers.error(e); });
+            }
+            return child;
+          },
+        };
+      }
+      case 'os':
+      case 'node:os': return {
+        platform: () => 'linux', arch: () => 'x64', homedir: () => vfs.env.HOME || '/home/user',
+        tmpdir: () => '/tmp', hostname: () => 'foam', type: () => 'Linux', release: () => '5.15.0-foam',
+        cpus: () => [{ model: 'Virtual CPU', speed: 2400 }], totalmem: () => 1073741824, freemem: () => 536870912, EOL: '\n',
+        endianness: () => 'LE',
+        userInfo: () => ({ username: vfs.env.USER || 'user', homedir: vfs.env.HOME || '/home/user', shell: '/bin/sh', uid: 1000, gid: 1000 }),
+        networkInterfaces: () => ({}),
+      };
+      case 'util':
+      case 'node:util': return {
+        promisify: (fn) => (...args) => new Promise((res, rej) => fn(...args, (err, r) => err ? rej(err) : res(r))),
+        inspect: (obj) => JSON.stringify(obj, null, 2),
+        format: (...args) => args.map(String).join(' '),
+        types: { isDate: (v) => v instanceof Date, isRegExp: (v) => v instanceof RegExp },
+      };
+      case 'events':
+      case 'node:events': {
+        class EventEmitter {
+          constructor() { this._events = {}; }
+          on(e, fn) { (this._events[e] ??= []).push(fn); return this; }
+          off(e, fn) { this._events[e] = (this._events[e] || []).filter(f => f !== fn); return this; }
+          emit(e, ...args) { (this._events[e] || []).forEach(fn => fn(...args)); return true; }
+          once(e, fn) { const w = (...a) => { this.off(e, w); fn(...a); }; return this.on(e, w); }
+          removeAllListeners(e) { if (e) delete this._events[e]; else this._events = {}; return this; }
+        }
+        return { EventEmitter, default: EventEmitter };
+      }
+      case 'url':
+      case 'node:url': return { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, parse: (s) => new URL(s), format: (o) => String(o) };
+      case 'assert':
+      case 'node:assert': {
+        const assert = (val, msg) => { if (!val) throw new Error(msg || `AssertionError: ${val}`); };
+        assert.ok = assert;
+        assert.equal = (a, b, msg) => { if (a != b) throw new Error(msg || `AssertionError: ${a} != ${b}`); };
+        assert.strictEqual = (a, b, msg) => { if (a !== b) throw new Error(msg || `AssertionError: ${a} !== ${b}`); };
+        assert.deepEqual = assert.deepStrictEqual = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(msg || 'AssertionError: deep equal failed'); };
+        assert.throws = (fn, msg) => { try { fn(); throw new Error(msg || 'Expected to throw'); } catch(e) { if (e.message === (msg || 'Expected to throw')) throw e; } };
+        assert.notEqual = (a, b, msg) => { if (a == b) throw new Error(msg || `AssertionError: ${a} == ${b}`); };
+        return assert;
+      }
+      default: return null;
+    }
+  }
+
   function requireModule(modulePath, fromDir = vfs.cwd) {
-    // Note: This assumes resolveModulePath was already called and file is cached
+    // Check built-in modules first
+    const builtin = getBuiltinModule(modulePath);
+    if (builtin !== null) return builtin;
+
     // For synchronous operation, we do simpler resolution
     let resolvedPath = modulePath;
 
@@ -1340,7 +1571,12 @@ async function ensureEsbuild() {
 
   esbuildInitPromise = (async () => {
     try {
-      esbuildModule = await import('https://esm.sh/esbuild-wasm@0.27.2');
+      const mod = await import('https://esm.sh/esbuild-wasm@0.27.2');
+      // esm.sh may put exports on .default or as named exports
+      esbuildModule = (mod.default && typeof mod.default.initialize === 'function') ? mod.default : mod;
+      if (typeof esbuildModule.initialize !== 'function') {
+        throw new Error('esbuild module does not expose initialize()');
+      }
       await esbuildModule.initialize({
         wasmURL: 'https://unpkg.com/esbuild-wasm@0.27.2/esbuild.wasm',
         worker: false,
