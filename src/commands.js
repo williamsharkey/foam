@@ -91,7 +91,9 @@ commands.help = async (args, { stdout }) => {
     stdout('  ' + row + '\n');
   }
   stdout('\nFoam-specific: dom, js, glob, fetch, curl, sleep, seq\n');
-  stdout('Dev tools:     git, npm, npx, node, python, pip\n');
+  stdout('Dev tools:     git, npm, npx, node, python, pip, ed\n');
+  stdout('Job control:   jobs, fg, bg (use & for background)\n');
+  stdout('Environment:   env, export, printenv, unset\n');
   stdout('Claude:        claude "your message"\n');
   stdout('Config:        foam config set api_key <key>\n');
   return 0;
@@ -560,6 +562,127 @@ commands.ed = async (args, { stdout, stderr, vfs }) => {
         modified = true;
       }
     }
+  }
+
+  return 0;
+};
+
+// ─── JOB CONTROL ────────────────────────────────────────────────────────────
+
+commands.jobs = async (args, { stdout, terminal }) => {
+  if (!terminal || !terminal.shell) {
+    stdout('jobs: no shell context\n');
+    return 1;
+  }
+
+  const jobs = terminal.shell.jobs || [];
+  if (jobs.length === 0) {
+    return 0;
+  }
+
+  for (const job of jobs) {
+    const status = job.status === 'running' ? 'Running' : 'Done';
+    const marker = job.id === jobs.length ? '+' : ' ';
+    stdout(`[${job.id}]${marker} ${status}\t${job.command}\n`);
+  }
+
+  return 0;
+};
+
+commands.fg = async (args, { stdout, stderr, terminal }) => {
+  if (!terminal || !terminal.shell) {
+    stderr('fg: no shell context\n');
+    return 1;
+  }
+
+  const jobs = terminal.shell.jobs || [];
+  const jobId = args[0] ? parseInt(args[0]) : jobs.length;
+
+  const job = jobs.find(j => j.id === jobId);
+  if (!job) {
+    stderr(`fg: ${jobId}: no such job\n`);
+    return 1;
+  }
+
+  // Bring to foreground - show output
+  stdout(job.output.join(''));
+
+  // Remove from background jobs if done
+  if (job.status === 'done' || job.status === 'failed') {
+    const idx = jobs.indexOf(job);
+    if (idx !== -1) jobs.splice(idx, 1);
+  }
+
+  return job.exitCode || 0;
+};
+
+commands.bg = async (args, { stdout, stderr, terminal }) => {
+  if (!terminal || !terminal.shell) {
+    stderr('bg: no shell context\n');
+    return 1;
+  }
+
+  const jobs = terminal.shell.jobs || [];
+  const jobId = args[0] ? parseInt(args[0]) : jobs.length;
+
+  const job = jobs.find(j => j.id === jobId);
+  if (!job) {
+    stderr(`bg: ${jobId}: no such job\n`);
+    return 1;
+  }
+
+  stdout(`[${job.id}] ${job.command} &\n`);
+  return 0;
+};
+
+// ─── ENVIRONMENT VARIABLES ──────────────────────────────────────────────────
+
+commands.env = async (args, { stdout, vfs }) => {
+  if (args.length === 0) {
+    // Print all environment variables
+    const env = vfs.env || {};
+    const keys = Object.keys(env).sort();
+    for (const key of keys) {
+      stdout(`${key}=${env[key]}\n`);
+    }
+    return 0;
+  }
+
+  // env KEY=VALUE command - run command with modified environment
+  // For now, just set the variable
+  for (const arg of args) {
+    if (arg.includes('=')) {
+      const [key, ...rest] = arg.split('=');
+      vfs.env[key] = rest.join('=');
+    }
+  }
+
+  return 0;
+};
+
+commands.printenv = async (args, { stdout, vfs }) => {
+  if (args.length === 0) {
+    return commands.env([], { stdout, vfs });
+  }
+
+  // Print specific variables
+  for (const key of args) {
+    if (vfs.env[key] !== undefined) {
+      stdout(`${vfs.env[key]}\n`);
+    }
+  }
+
+  return 0;
+};
+
+commands.unset = async (args, { stderr, vfs }) => {
+  if (args.length === 0) {
+    stderr('Usage: unset <variable>\n');
+    return 1;
+  }
+
+  for (const key of args) {
+    delete vfs.env[key];
   }
 
   return 0;

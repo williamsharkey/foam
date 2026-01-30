@@ -7,6 +7,9 @@ class Shell {
     this.lastExitCode = 0;
     this.aliases = {};
     this.terminal = null; // Set by terminal UI
+    this.jobs = []; // Background jobs
+    this.nextJobId = 1;
+    this.currentJob = null; // Foreground job
   }
 
   // Main entry: execute a command string, return { stdout, stderr, exitCode }
@@ -84,7 +87,72 @@ class Shell {
   }
 
   async _execPipeline(input, { stdout, stderr }) {
+    // Check for background job (&)
+    const isBackground = input.trim().endsWith('&');
+    if (isBackground) {
+      input = input.trim().slice(0, -1).trim();
+    }
+
     const segments = this._splitPipes(input);
+
+    if (isBackground) {
+      // Start job in background
+      const jobId = this.nextJobId++;
+      const job = {
+        id: jobId,
+        command: input,
+        status: 'running',
+        pid: Date.now(), // Fake PID
+        output: [],
+        exitCode: null,
+      };
+
+      this.jobs.push(job);
+      stdout(`[${jobId}] ${job.pid}\n`);
+
+      // Run in background (non-blocking)
+      (async () => {
+        try {
+          const jobStdout = (t) => job.output.push(t);
+          const jobStderr = (t) => job.output.push(t);
+
+          if (segments.length === 1) {
+            job.exitCode = await this._execSingle(segments[0].trim(), {
+              stdin: null,
+              stdout: jobStdout,
+              stderr: jobStderr,
+            });
+          } else {
+            let currentStdin = null;
+            for (let i = 0; i < segments.length; i++) {
+              const isLast = i === segments.length - 1;
+              const captured = [];
+              const segStdout = isLast ? jobStdout : (t) => captured.push(t);
+              await this._execSingle(segments[i].trim(), {
+                stdin: currentStdin,
+                stdout: segStdout,
+                stderr: jobStderr,
+              });
+              currentStdin = captured.join('');
+            }
+            job.exitCode = this.lastExitCode;
+          }
+
+          job.status = 'done';
+          if (this.terminal) {
+            this.terminal.write(`\n[${jobId}]+ Done\t${job.command}\n`);
+          }
+        } catch (err) {
+          job.status = 'failed';
+          job.exitCode = 1;
+          job.output.push(`Error: ${err.message}\n`);
+        }
+      })();
+
+      return 0; // Background job started
+    }
+
+    // Foreground execution
     if (segments.length === 1) {
       return this._execSingle(segments[0].trim(), { stdin: null, stdout, stderr });
     }
