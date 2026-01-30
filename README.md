@@ -1,252 +1,244 @@
-# Foam
+# Foam - Browser-Native Cloud OS
 
-A browser-native cloud OS that runs Claude Code in a virtual Linux terminal — no servers, no sockets, no native dependencies.
+A complete development environment running in your browser. No servers. No build step. No native dependencies. Just open `index.html` and start coding.
 
-## What is Foam?
+**Live Demo:** [williamsharkey.github.io/foam](https://williamsharkey.github.io/foam)
 
-Foam is a self-contained web page that simulates a Linux environment in the browser. It gives Claude first-class access to a virtual filesystem, shell commands, and the live DOM/JavaScript VM of the page it's running on. Claude can execute `ls`, `grep`, `git`, `npm`, and other standard dev tools — all implemented as pure JavaScript functions backed by IndexedDB — and can read and modify the webpage directly without tunnels or WebSocket bridges.
+## Zero-Install Development
 
-## Why?
+```bash
+# Clone a GitHub repository
+git clone https://github.com/lodash/lodash
 
-- **No backend required.** Claude talks directly to the Anthropic API from the browser. Commands run in-page. There is no relay server.
-- **No native OS dependency.** Every tool Claude needs (`git`, `npm`, `grep`, `find`, etc.) is a JS function with the same stdin/stdout/stderr interface as the real thing. No WASM Linux kernel, no containers.
-- **Live page access.** Claude can inspect the DOM, run arbitrary JS, edit styles, and mutate the page — the "computer" it's operating on *is* the page.
-- **Persistence.** The virtual filesystem lives in IndexedDB. Reload the page and your files, git history, and project state are still there.
-- **Zero-install.** Open the HTML file (or serve it statically). That's it.
+# Install real npm packages
+npm install lodash dayjs chalk
+
+# Run commands with pipes and redirects
+find src -name "*.js" | xargs grep "export" | sort | uniq
+
+# Write and execute JavaScript
+node -e "console.log(require('lodash').chunk([1,2,3,4,5], 2))"
+
+# Let Claude Code do the work
+spirit "create an Express server with user authentication"
+```
+
+**Everything runs in your browser tab.** Files persist in IndexedDB. Reload the page—your work is still there.
+
+## Why Foam?
+
+- **No backend.** Claude talks directly to the Anthropic API. Commands run in-page. No relay server.
+- **No build step.** Plain ES modules. No bundler, no transpiler. Just serve the files.
+- **Single HTML file.** Deploy anywhere: GitHub Pages, S3, `file://` protocol.
+- **Persistent filesystem.** IndexedDB survives reloads. Your project state is always there.
+- **AI-first.** Claude Code (Spirit) has full filesystem and shell access out of the box.
+
+## Feature Highlights
+
+### 50+ Unix Commands
+Real implementations with proper stdin/stdout/stderr:
+
+| Category | Commands |
+|----------|----------|
+| **Files** | `ls -laR`, `cat -n`, `head`, `tail`, `touch`, `cp -r`, `mv`, `rm -rf`, `mkdir -p`, `find`, `ln` |
+| **Text** | `grep -rni`, `sed 's/a/b/g'`, `sort`, `uniq`, `wc -lwc`, `tr`, `cut`, `diff`, `tee`, `xargs` |
+| **Shell** | `cd`, `pwd`, `echo -ne`, `printf`, `env`, `export`, `which`, `test`/`[` |
+| **Dev** | `git`, `npm`, `node` |
+
+### Real Git
+Full version control via isomorphic-git:
+```bash
+git init
+git clone https://github.com/user/repo
+git add . && git commit -m "initial commit"
+git log --oneline
+git diff HEAD~1
+git branch feature && git checkout feature
+git status
+```
+
+### Real npm
+Downloads actual packages from `registry.npmjs.org`:
+```bash
+npm init
+npm install lodash express chalk
+npm list
+npm run build
+npm uninstall lodash
+```
+
+### Node.js Runtime
+Execute JavaScript with CommonJS require():
+```bash
+node script.js
+node -e "console.log(require('lodash').VERSION)"
+node -p "2 + 2"
+```
+
+Built-in shims for `fs`, `path`, `process`, `Buffer`, `child_process`, and more.
+
+### Full Shell Scripting
+```bash
+# Variables and expansion
+export NAME="Foam" && echo "Hello $NAME"
+
+# Pipes and redirects
+cat data.txt | grep error | sort | uniq > errors.txt
+
+# Control structures
+for f in *.js; do echo "Processing $f"; wc -l "$f"; done
+
+if [ -f package.json ]; then npm install; fi
+
+# Command substitution
+echo "Today is $(date)"
+
+# Functions
+greet() { echo "Hello, $1!"; }
+greet World
+```
+
+### Claude Code Integration (Spirit)
+AI agent with full shell and filesystem access:
+```bash
+spirit "refactor this code to use async/await"
+spirit "add error handling to the API endpoints"
+spirit "write tests for the User model"
+```
+
+Spirit can read files, write files, run commands, and iterate until the task is complete.
+
+### Python via Pyodide
+Full Python 3.11 runtime:
+```bash
+python -c "print('Hello from Python!')"
+python script.py
+pip install numpy pandas
+```
+
+### Terminal Raw Mode
+Interactive input for editors and tools that need character-by-character control.
+
+### Persistent Filesystem
+Everything stored in IndexedDB:
+- Files survive page reload
+- Git history persists
+- node_modules cached
+- Work in progress never lost
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────┐
-│                   Browser Tab                   │
-│                                                 │
-│  ┌───────────┐   ┌──────────────────────────┐   │
-│  │ Terminal   │   │ Claude API Client        │   │
-│  │ UI         │◄─►│ (tool_use loop)          │   │
-│  │ (xterm.js) │   │                          │   │
-│  └─────┬──────┘   └──────────┬───────────────┘   │
-│        │                     │                   │
-│        ▼                     ▼                   │
-│  ┌──────────────────────────────────────────┐   │
-│  │          Shell Interpreter               │   │
-│  │  parse → pipeline → execute → output     │   │
-│  └─────────────────┬────────────────────────┘   │
-│                    │                             │
-│        ┌───────────┼───────────┐                 │
-│        ▼           ▼           ▼                 │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐         │
-│  │ Coreutils│ │ Dev Tools│ │ DOM/JS   │         │
-│  │ ls,cat,  │ │ git,npm  │ │ Access   │         │
-│  │ grep,... │ │ node,... │ │ Tools    │         │
-│  └────┬─────┘ └────┬─────┘ └──────────┘         │
-│       │             │                            │
-│       ▼             ▼                            │
-│  ┌──────────────────────────────────────────┐   │
-│  │     Virtual File System (VFS)            │   │
-│  │     in-memory cache + IndexedDB          │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TB
+    subgraph Browser["Browser Tab"]
+        subgraph UI["User Interface"]
+            Terminal["Terminal UI\nLine editing, History, ANSI"]
+            Spirit["Spirit (Claude Code)\nTool-use loop"]
+        end
 
-## Components
+        subgraph Shell["Shell Interpreter"]
+            Features["Pipes | Redirects | Variables | Control flow\n$(cmd) | quotes | && || ; &"]
+        end
 
-### 1. Virtual File System (`src/vfs.js`)
+        subgraph Commands["Commands (50+ implementations)"]
+            Core["coreutils"]
+            Git["git"]
+            NPM["npm"]
+            Node["node"]
+            Python["python"]
+        end
 
-Unix-like filesystem stored in IndexedDB with an in-memory cache.
+        subgraph VFS["Virtual File System (IndexedDB)"]
+            API["POSIX API | Symlinks | Glob"]
+            Dirs["/home/user | /tmp | /node_modules"]
+        end
 
-- Inodes with path, type, mode, timestamps, content
-- Full path resolution: absolute, relative, `~`, `.`, `..`
-- Operations: `stat`, `readFile`, `writeFile`, `mkdir`, `readdir`, `unlink`, `rmdir`, `rename`, `copy`, `glob`
-- Default directory tree: `/home/user`, `/tmp`, `/bin`, `/etc`, `/var`, `/dev`
-- Environment variables (`HOME`, `PWD`, `PATH`, etc.)
-
-### 2. Shell Commands (`src/commands.js`)
-
-Each command is a JS async function with the signature:
-
-```js
-async function cmd(args, { stdin, stdout, stderr, vfs, env }) → exitCode
+        Terminal --> Shell
+        Spirit --> Shell
+        Shell --> Commands
+        Commands --> VFS
+    end
 ```
 
-This matches real Unix conventions: args array, three streams, exit code. Claude sees no difference from a real shell.
+## Quick Start
 
-**Coreutils:**
-| Command | Notes |
-|---------|-------|
-| `ls`    | `-l`, `-a`, `-R`, `-h` flags |
-| `cd`    | updates `$PWD` |
-| `pwd`   | prints working directory |
-| `cat`   | concatenate files, `-n` for line numbers |
-| `echo`  | with `-n`, `-e` support |
-| `mkdir` | `-p` for recursive |
-| `rm`    | `-r`, `-f` flags |
-| `cp`    | `-r` flag |
-| `mv`    | rename/move |
-| `touch` | create or update timestamp |
-| `head`  | `-n` flag |
-| `tail`  | `-n` flag |
-| `wc`    | `-l`, `-w`, `-c` |
-| `grep`  | `-i`, `-r`, `-n`, `-l`, `-c`, `-v` |
-| `find`  | `-name`, `-type` |
-| `sort`  | basic sort |
-| `uniq`  | deduplicate |
-| `tee`   | write to file and stdout |
-| `chmod` | set file mode |
-| `env`   | print environment |
-| `export`| set env var |
-| `which` | locate command |
-| `clear` | clear terminal |
-| `sed`   | `s/pattern/replace/` basics |
-| `diff`  | compare two files |
-| `xargs` | pipe stdin to args |
-| `true` / `false` | exit 0 / exit 1 |
+**Online:** Visit [williamsharkey.github.io/foam](https://williamsharkey.github.io/foam)
 
-### 3. Shell Interpreter (`src/shell.js`)
-
-Parses and executes command lines.
-
-- Tokenizer: handles quoting (`"`, `'`, `` ` ``), escapes, variables (`$VAR`, `${VAR}`)
-- Pipelines: `cmd1 | cmd2 | cmd3` — stdout of one feeds stdin of next
-- Redirects: `>`, `>>`, `<`, `2>`
-- Logical operators: `&&`, `||`, `;`
-- Subshells: `$(command)` substitution
-- `$?` for last exit code
-
-### 4. Terminal UI (`src/terminal.js`)
-
-A terminal rendered in the browser.
-
-- Prompt with PS1 support
-- Command history (up/down arrows)
-- Basic line editing
-- Scrollback buffer
-- ANSI color rendering (bold, fg colors at minimum)
-- Auto-scroll on output
-- Click-to-focus
-
-### 5. Claude API Client (`src/claude.js`)
-
-Integrates with the Anthropic Messages API using tool_use.
-
-- Stores API key in localStorage (set via `foam config set api_key <key>` or settings UI)
-- System prompt describes the virtual environment and available tools
-- Tool definitions map 1:1 to shell commands:
-  - `bash` tool: takes a `command` string, runs it through the shell interpreter, returns stdout/stderr/exit_code
-  - `read_file` / `write_file` / `edit_file`: direct VFS operations
-  - `glob` / `grep`: search tools
-  - `js_eval`: execute JS in the page context
-  - `dom_query` / `dom_mutate`: read/modify the DOM
-- Conversation loop: user message → Claude response → execute tools → feed results back → repeat until Claude produces a text response
-- Streaming support for long responses
-
-### 6. Dev Tools (`src/devtools.js`)
-
-Simplified implementations of standard dev tooling, operating entirely on the VFS.
-
-**git** (simplified):
-- `git init` — create `.git/` structure in VFS
-- `git add <files>` — stage files (snapshot content)
-- `git status` — show staged/unstaged changes
-- `git commit -m "msg"` — store commit object with tree snapshot, parent, message
-- `git log` — print commit history
-- `git diff` — diff working tree vs last commit
-- `git branch` / `git checkout` — branch management
-
-**npm** (simplified):
-- `npm init` — generate `package.json`
-- `npm install <pkg>` — fetch from CDN (esm.sh/unpkg), store in `node_modules/`
-- `npm run <script>` — execute script from `package.json`
-
-**node**:
-- `node <file>` — eval JS file contents in a sandboxed scope
-- `node -e "code"` — eval inline JS
-
-### 7. DOM/Page Access Tools (`src/domtools.js`)
-
-These give Claude direct access to the page it's running on.
-
-- `document.querySelector` / `querySelectorAll` — read DOM nodes
-- `getComputedStyle` — inspect styles
-- `innerHTML` / `textContent` mutation
-- `setAttribute` / `removeAttribute`
-- `createElement` / `appendChild` / `removeChild`
-- `eval()` in page scope — run arbitrary JS
-- `fetch()` — make HTTP requests from the page
-- `canvas` API access for drawing
-- `localStorage` / `sessionStorage` read/write (namespaced to avoid collision with VFS)
-
-## Spirit Integration
-
-Foam's Claude agent is powered by [Spirit](https://github.com/williamsharkey/spirit) — a shared Claude Code agent loop library that targets virtual OS environments.
-
-Spirit defines an `OSProvider` interface. Foam implements `FoamProvider` (`src/foam-provider.js`) which adapts the VFS and shell to Spirit's expectations. This means Spirit handles the Claude API calls, tool definitions, and agent loop — Foam just provides the OS layer.
-
-```
-Spirit (agent loop)  ←→  FoamProvider  ←→  VFS + Shell + Terminal
+**Local:**
+```bash
+git clone https://github.com/williamsharkey/foam
+cd foam
+# Just open index.html in a browser - no build step!
+python -m http.server 8000  # Or any static file server
 ```
 
-Until Spirit ships its ES module bundle, Foam includes a standalone `claude.js` that implements the same tool_use loop directly. Once `spirit.es.js` is available, `claude.js` gets replaced with a Spirit import.
-
-**Coordination issues filed on Spirit:**
-- [#1](https://github.com/williamsharkey/spirit/issues/1) — FileInfo/StatResult type definitions
-- [#2](https://github.com/williamsharkey/spirit/issues/2) — exec() shell contract
-- [#3](https://github.com/williamsharkey/spirit/issues/3) — ES module bundle for Foam
-- [#4](https://github.com/williamsharkey/spirit/issues/4) — DOM/JS tools scope
-- [#5](https://github.com/williamsharkey/spirit/issues/5) — Custom tool registration API
+**Configure Claude:**
+```bash
+foam config set api_key sk-ant-...
+```
 
 ## File Structure
 
 ```
 foam/
-├── index.html              # Single entry point, loads everything
-├── README.md
-├── style.css               # Terminal styling
+├── index.html          # Single entry point (no build required)
+├── style.css           # Terminal styling
 ├── src/
-│   ├── vfs.js              # Virtual filesystem + IndexedDB
-│   ├── commands.js         # Coreutils (ls, grep, cat, sed, etc.)
-│   ├── shell.js            # Command parser + pipeline executor
-│   ├── terminal.js         # Terminal UI rendering
-│   ├── claude.js           # Claude API client (interim, replaced by Spirit)
-│   ├── devtools.js         # git, npm, node implementations
-│   └── foam-provider.js    # Spirit OSProvider adapter
+│   ├── vfs.js          # Virtual filesystem (IndexedDB + memory cache)
+│   ├── shell.js        # Command parser (pipes, redirects, variables)
+│   ├── commands.js     # 50+ Unix command implementations
+│   ├── terminal.js     # Terminal UI (history, ANSI, raw mode)
+│   ├── claude.js       # Claude API client
+│   ├── devtools.js     # git, npm, node implementations
+│   └── foam-provider.js # Spirit OSProvider adapter
+└── spirit/             # Spirit submodule
 ```
 
-## Usage
+## Comparison
 
-1. Open `index.html` in a browser (or serve statically)
-2. Set your Claude API key: `foam config set api_key sk-ant-...`
-3. Use the terminal like a normal shell:
-   ```
-   $ mkdir myproject && cd myproject
-   $ echo "hello world" > index.html
-   $ cat index.html
-   hello world
-   $ git init && git add . && git commit -m "init"
-   ```
-4. Talk to Claude: `claude "add a button to index.html that says hello"`
-5. Claude will read files, write files, and run commands — all inside the browser
+| Feature | Foam | StackBlitz | CodeSandbox | Replit |
+|---------|------|------------|-------------|--------|
+| No backend | Yes | No | No | No |
+| No build step | Yes | No | No | No |
+| Works offline | Yes | Partial | No | No |
+| Single HTML file | Yes | No | No | No |
+| AI integration | Spirit | No | AI assist | Ghostwriter |
+| Open source | Yes | No | Partial | No |
+| Self-hostable | Yes | No | No | No |
 
-## Design Principles
+## Design Philosophy
 
-1. **IO compatibility over feature completeness.** Each command doesn't need every flag — it needs the same stdin/stdout/stderr/exit-code contract so Claude's tool-use works identically to a real terminal.
-2. **No build step.** ES modules loaded directly by the browser. No bundler, no transpiler.
-3. **Single page.** Everything is one HTML file with module imports. Deployable anywhere static files can be served, including `file://`.
-4. **Persistence by default.** IndexedDB survives page reloads. The filesystem is your project state.
-5. **Claude is a first-class user.** The API client and tool definitions are designed so Claude's tool_use responses map directly to shell execution with no adapter layer.
+1. **IO compatibility over features.** Commands don't need every flag—they need correct stdin/stdout/stderr/exit-code so Claude's tool-use works like a real terminal.
 
-## Status
+2. **No build step.** ES modules loaded directly. Change a file, refresh the page.
 
-Under active development. Current progress:
+3. **Claude is a first-class user.** Tool definitions map 1:1 to shell commands. No adapter layer.
 
-- [x] Virtual filesystem with IndexedDB persistence
-- [x] Shell commands (30+ coreutils)
-- [x] Shell interpreter (pipes, redirects, `&&`/`||`, variable expansion, command substitution)
-- [x] Terminal UI (history, tab completion, ANSI colors, Ctrl+C)
-- [x] Claude API integration with tool_use loop
-- [x] Dev tools (git, npm, node)
-- [x] FoamProvider for Spirit integration
-- [ ] Spirit submodule integration (waiting on Spirit ES bundle)
-- [ ] DOM access tools (pending Spirit tool registration API)
+4. **Persistence by default.** Your work survives reloads, crashes, and browser restarts.
+
+## Related Projects
+
+```mermaid
+flowchart LR
+    Foam["Foam ★"]
+    Shiro["Shiro"]
+    Spirit["Spirit"]
+    Fluffy["FluffyCoreutils"]
+    Nimbus["Nimbus"]
+    Wind["Windwalker"]
+
+    Foam -->|"AI agent"| Spirit
+    Foam -->|"50+ commands"| Fluffy
+    Shiro -->|"sister project"| Foam
+    Nimbus -->|"orchestrates"| Foam
+    Wind -->|"tests"| Foam
+```
+
+- [Shiro](https://github.com/williamsharkey/shiro) - TypeScript/Vite sister project (more features, requires build)
+- [Spirit](https://github.com/williamsharkey/spirit) - Claude Code agent library
+- [Nimbus](https://github.com/williamsharkey/nimbus) - Multi-repo orchestration dashboard
+- [Windwalker](https://github.com/williamsharkey/windwalker) - Test automation suite
+- [FluffyCoreutils](https://github.com/williamsharkey/fluffycoreutils) - Shared Unix commands
 
 ## License
 
