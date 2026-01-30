@@ -350,7 +350,20 @@ class Shell {
       }
 
       if (ch === '\\' && !inSingle) {
-        escape = true;
+        const next = input[i + 1];
+        if (inDouble) {
+          // In double quotes, only \\ \$ \" \` \! are special escapes
+          if (next === '\\' || next === '$' || next === '"' || next === '`' || next === '!') {
+            current += next;
+            i++;
+          } else {
+            // Preserve the backslash literally (e.g. \n stays as \n for printf)
+            current += '\\';
+          }
+        } else {
+          // Outside quotes, backslash escapes the next character
+          escape = true;
+        }
         continue;
       }
 
@@ -494,6 +507,11 @@ class Shell {
           // Here document: <<DELIM or <<-DELIM or <<'DELIM'
           const heredoc = this._parseHeredoc(input, i + 2);
           redirects.push({ type: '<', file: '__heredoc__', heredocContent: heredoc.content });
+          // Parse any redirects on the same line as <<DELIM (e.g. "<<EOF > outfile")
+          if (heredoc.restOfLine) {
+            const extra = this._parseRedirects(heredoc.restOfLine);
+            for (const r of extra.redirects) redirects.push(r);
+          }
           i = heredoc.end;
           continue;
         }
@@ -1149,10 +1167,14 @@ class Shell {
       }
     }
 
+    // Capture remaining text on the first line (e.g. "> outfile" in "<<EOF > outfile")
+    const firstLineEnd = input.indexOf('\n', i);
+    const restOfLine = firstLineEnd === -1 ? '' : input.slice(i, firstLineEnd).trim();
+
     // Find the heredoc body (everything from next line until delimiter on its own line)
-    let bodyStart = input.indexOf('\n', i);
+    let bodyStart = firstLineEnd;
     if (bodyStart === -1) {
-      return { content: '', end: input.length };
+      return { content: '', end: input.length, restOfLine };
     }
     bodyStart++;
 
@@ -1175,12 +1197,12 @@ class Shell {
       pos = lineEnd + 1;
     }
 
-    let content = bodyLines.join('\n');
+    let content = bodyLines.length > 0 ? bodyLines.join('\n') + '\n' : '';
     if (!noExpansion) {
       content = this._expandVars(content);
     }
 
-    return { content, end: pos };
+    return { content, end: pos, restOfLine };
   }
 }
 
