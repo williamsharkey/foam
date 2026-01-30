@@ -457,92 +457,274 @@ commands.npm = async (args, { stdout, stderr, vfs, exec }) => {
   return 1;
 };
 
-// Helper function to install a package
-async function installPackage(pkgName, version, vfs, stdout, stderr) {
-  const pkgDir = `node_modules/${pkgName}`;
-  await vfs.mkdir(pkgDir, { recursive: true });
+// Helper function to extract tar.gz using DecompressionStream and browser APIs
+async function extractTarball(tarballBuffer, vfs, baseDir, stdout) {
+  // Step 1: Decompress gzip using DecompressionStream
+  const gzipStream = new Blob([tarballBuffer]).stream();
+  const decompressedStream = gzipStream.pipeThrough(new DecompressionStream('gzip'));
 
-  // Try registry.npmjs.org first (with CORS proxy)
-  try {
-    const registryUrl = `https://registry.npmjs.org/${pkgName}`;
+  // Read decompressed data
+  const reader = decompressedStream.getReader();
+  const chunks = [];
+  let totalSize = 0;
 
-    // Fetch package metadata from npm registry (via CORS proxy)
-    const metaRes = await globalThis.fetch(registryUrl);
-
-    if (metaRes.ok) {
-      const meta = await metaRes.json();
-      const versionToInstall = version === 'latest' ? meta['dist-tags']?.latest : version;
-      const versionData = meta.versions?.[versionToInstall];
-
-      if (!versionData) {
-        throw new Error(`Version ${version} not found`);
-      }
-
-      // Create package.json in node_modules
-      const pkgJson = {
-        name: versionData.name,
-        version: versionData.version,
-        description: versionData.description,
-        main: versionData.main || 'index.js',
-        dependencies: versionData.dependencies || {},
-      };
-
-      await vfs.writeFile(`${pkgDir}/package.json`, JSON.stringify(pkgJson, null, 2));
-
-      // Try to fetch from esm.sh as browser-compatible ESM
-      stdout(`  Fetching ${pkgName}@${versionData.version} from esm.sh...\n`);
-      const esmUrl = `https://esm.sh/${pkgName}@${versionData.version}`;
-      const esmRes = await globalThis.fetch(esmUrl);
-
-      if (esmRes.ok) {
-        const code = await esmRes.text();
-        await vfs.writeFile(`${pkgDir}/index.js`, code);
-        stdout(`  + ${pkgName}@${versionData.version}\n`);
-      } else {
-        // Fallback: create a stub that tells users to use npx
-        const stub = `// ${pkgName}@${versionData.version}
-// This package is not browser-compatible via npm install.
-// Try using: npx -e "const pkg = await import('https://esm.sh/${pkgName}'); ..."
-throw new Error('${pkgName} requires npx or browser-compatible alternative');
-`;
-        await vfs.writeFile(`${pkgDir}/index.js`, stub);
-        stderr(`  Warning: ${pkgName} may not be browser-compatible\n`);
-      }
-
-      return;
-    }
-  } catch (err) {
-    // Registry failed, try esm.sh fallback
-    stdout(`  Trying esm.sh...\n`);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalSize += value.length;
   }
 
-  // Fallback to esm.sh only
-  try {
-    const esmUrl = version === 'latest'
-      ? `https://esm.sh/${pkgName}`
-      : `https://esm.sh/${pkgName}@${version}`;
+  // Combine chunks into single Uint8Array
+  const tarData = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const chunk of chunks) {
+    tarData.set(chunk, offset);
+    offset += chunk.length;
+  }
 
-    const res = await globalThis.fetch(esmUrl);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  // Step 2: Parse TAR format
+  // TAR format: Each file has a 512-byte header followed by file data (rounded to 512 bytes)
+  let pos = 0;
+  let filesExtracted = 0;
+
+  while (pos < tarData.length) {
+    // Read TAR header (512 bytes)
+    if (pos + 512 > tarData.length) break;
+
+    const header = tarData.slice(pos, pos + 512);
+
+    // Check if this is a zero block (end of archive)
+    if (header.every(b => b === 0)) break;
+
+    // Parse header fields
+    const name = readString(header, 0, 100).replace(/^package\//, ''); // Remove "package/" prefix
+    const mode = readOctal(header, 100, 8);
+    const size = readOctal(header, 124, 12);
+    const typeFlag = String.fromCharCode(header[156]);
+
+    pos += 512; // Move past header
+
+    // Skip if no name or size is invalid
+    if (!name || size < 0) {
+      pos += Math.ceil(size / 512) * 512;
+      continue;
     }
 
-    const code = await res.text();
-    await vfs.writeFile(`${pkgDir}/index.js`, code);
+    // Handle different file types
+    if (typeFlag === '0' || typeFlag === '' || typeFlag === '5') {
+      // Regular file or directory
+      if (typeFlag === '5' || name.endsWith('/')) {
+        // Directory - create it
+        const dirPath = `${baseDir}/${name}`.replace(/\/$/, '');
+        try {
+          await vfs.mkdir(dirPath, { recursive: true });
+        } catch (e) {
+          // Ignore if already exists
+        }
+      } else if (size > 0) {
+        // Regular file - extract content
+        const fileData = tarData.slice(pos, pos + size);
+        const filePath = `${baseDir}/${name}`;
 
-    // Create minimal package.json
-    const pkgJson = { name: pkgName, version: version === 'latest' ? '1.0.0' : version };
-    await vfs.writeFile(`${pkgDir}/package.json`, JSON.stringify(pkgJson, null, 2));
+        // Ensure parent directory exists
+        const parentDir = filePath.substring(0, filePath.lastIndexOf('/'));
+        if (parentDir && parentDir !== baseDir) {
+          try {
+            await vfs.mkdir(parentDir, { recursive: true });
+          } catch (e) {
+            // Ignore if already exists
+          }
+        }
 
-    stdout(`  + ${pkgName}@${version}\n`);
+        // Write file
+        const textDecoder = new TextDecoder();
+        const content = textDecoder.decode(fileData);
+        await vfs.writeFile(filePath, content);
+        filesExtracted++;
+      }
+
+      // Move to next file (data is padded to 512-byte boundary)
+      pos += Math.ceil(size / 512) * 512;
+    } else {
+      // Unknown type - skip
+      pos += Math.ceil(size / 512) * 512;
+    }
+  }
+
+  return filesExtracted;
+}
+
+// Helper to read null-terminated string from buffer
+function readString(buffer, offset, length) {
+  let str = '';
+  for (let i = 0; i < length; i++) {
+    const char = buffer[offset + i];
+    if (char === 0) break;
+    str += String.fromCharCode(char);
+  }
+  return str.trim();
+}
+
+// Helper to read octal number from buffer
+function readOctal(buffer, offset, length) {
+  const str = readString(buffer, offset, length);
+  return str ? parseInt(str, 8) : 0;
+}
+
+// Helper function to install a package from npm registry with tarball extraction
+async function installPackage(pkgName, version, vfs, stdout, stderr) {
+  const pkgDir = `node_modules/${pkgName}`;
+
+  try {
+    // Fetch package metadata from npm registry
+    stdout(`  Fetching ${pkgName} metadata...\n`);
+    const registryUrl = `https://registry.npmjs.org/${pkgName}`;
+    const metaRes = await globalThis.fetch(registryUrl);
+
+    if (!metaRes.ok) {
+      throw new Error(`Registry returned ${metaRes.status}`);
+    }
+
+    const meta = await metaRes.json();
+    const versionToInstall = version === 'latest' || version === '^1.0.0'
+      ? meta['dist-tags']?.latest
+      : version.replace(/^[\^~]/, ''); // Remove semver prefixes
+
+    const versionData = meta.versions?.[versionToInstall];
+
+    if (!versionData) {
+      throw new Error(`Version ${version} not found`);
+    }
+
+    // Get tarball URL
+    const tarballUrl = versionData.dist?.tarball;
+    if (!tarballUrl) {
+      throw new Error('No tarball URL found in package metadata');
+    }
+
+    stdout(`  Downloading ${pkgName}@${versionData.version}...\n`);
+
+    // Download tarball
+    const tarballRes = await globalThis.fetch(tarballUrl);
+    if (!tarballRes.ok) {
+      throw new Error(`Failed to download tarball: ${tarballRes.status}`);
+    }
+
+    const tarballBuffer = await tarballRes.arrayBuffer();
+    stdout(`  Downloaded ${(tarballBuffer.byteLength / 1024).toFixed(1)}KB\n`);
+
+    // Create package directory
+    await vfs.mkdir(pkgDir, { recursive: true });
+
+    // Extract tarball
+    stdout(`  Extracting...\n`);
+    const filesExtracted = await extractTarball(tarballBuffer, vfs, pkgDir, stdout);
+    stdout(`  + ${pkgName}@${versionData.version} (${filesExtracted} files)\n`);
+
+    return versionData.version;
+
   } catch (err) {
-    throw new Error(`Failed to install ${pkgName}: ${err.message}`);
+    // Fallback to esm.sh for browser-compatible packages
+    stderr(`  npm registry failed: ${err.message}\n`);
+    stdout(`  Falling back to esm.sh...\n`);
+
+    try {
+      await vfs.mkdir(pkgDir, { recursive: true });
+
+      const esmUrl = version === 'latest' || version.startsWith('^') || version.startsWith('~')
+        ? `https://esm.sh/${pkgName}`
+        : `https://esm.sh/${pkgName}@${version}`;
+
+      const res = await globalThis.fetch(esmUrl);
+      if (!res.ok) {
+        throw new Error(`esm.sh returned ${res.status}`);
+      }
+
+      const code = await res.text();
+      await vfs.writeFile(`${pkgDir}/index.js`, code);
+
+      // Create minimal package.json
+      const pkgJson = {
+        name: pkgName,
+        version: version === 'latest' ? '1.0.0' : version.replace(/^[\^~]/, ''),
+        main: 'index.js'
+      };
+      await vfs.writeFile(`${pkgDir}/package.json`, JSON.stringify(pkgJson, null, 2));
+
+      stdout(`  + ${pkgName}@${pkgJson.version} (esm.sh)\n`);
+      return pkgJson.version;
+
+    } catch (fallbackErr) {
+      throw new Error(`Both npm registry and esm.sh failed: ${fallbackErr.message}`);
+    }
   }
 }
 
 // ─── NODE ───────────────────────────────────────────────────────────────────
 
 commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
+  // Helper to resolve and load a module
+  async function loadModule(modulePath) {
+    // Try to resolve the module
+    let resolvedPath = modulePath;
+
+    // Check if it's a relative/absolute path
+    if (modulePath.startsWith('./') || modulePath.startsWith('../') || modulePath.startsWith('/')) {
+      // Resolve relative to current directory
+      resolvedPath = vfs.resolvePath(modulePath, vfs.cwd);
+
+      // Add .js extension if missing
+      if (!resolvedPath.endsWith('.js') && !resolvedPath.endsWith('.json')) {
+        try {
+          await vfs.readFile(resolvedPath + '.js');
+          resolvedPath += '.js';
+        } catch {
+          try {
+            await vfs.readFile(resolvedPath + '/index.js');
+            resolvedPath += '/index.js';
+          } catch {
+            // Try as-is
+          }
+        }
+      }
+    } else {
+      // Try to load from node_modules
+      const nodeModulesPath = `node_modules/${modulePath}`;
+
+      try {
+        // Check if package.json exists
+        const pkgJsonPath = `${nodeModulesPath}/package.json`;
+        const pkgJson = JSON.parse(await vfs.readFile(pkgJsonPath));
+        const mainFile = pkgJson.main || 'index.js';
+        resolvedPath = `${nodeModulesPath}/${mainFile}`;
+      } catch {
+        // Fallback to index.js
+        resolvedPath = `${nodeModulesPath}/index.js`;
+      }
+    }
+
+    // Load the file
+    try {
+      const content = await vfs.readFile(resolvedPath);
+
+      // Check if it's JSON
+      if (resolvedPath.endsWith('.json')) {
+        return JSON.parse(content);
+      }
+
+      // For .js files, we need to evaluate them
+      // For now, return a placeholder that tells users to use dynamic import
+      return {
+        __foam_module: true,
+        __path: resolvedPath,
+        __help: `Module loaded from ${resolvedPath}. Use dynamic import() for ES modules.`
+      };
+    } catch (err) {
+      throw new Error(`Cannot find module '${modulePath}': ${err.message}`);
+    }
+  }
+
   if (args.length === 0 || args[0] === '-e') {
     const code = args[0] === '-e' ? args.slice(1).join(' ') : (stdin || '');
     if (!code) { stderr('Usage: node -e "code" or node <file>\n'); return 1; }
@@ -553,17 +735,39 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
           log: (...a) => logs.push(a.map(String).join(' ')),
           error: (...a) => logs.push(a.map(String).join(' ')),
           warn: (...a) => logs.push(a.map(String).join(' ')),
+          info: (...a) => logs.push(a.map(String).join(' ')),
         },
-        require: (mod) => { throw new Error(`Cannot require '${mod}' in Foam`); },
+        require: (mod) => {
+          // Synchronous require is limited in browser, but we can handle JSON
+          try {
+            // For node_modules, try to load package.json
+            const pkgPath = `node_modules/${mod}/package.json`;
+            const pkgJson = vfs.readFileSync?.(pkgPath) || null;
+            if (pkgJson) {
+              stderr(`Note: require('${mod}') loaded package.json. Use dynamic import() for full module support.\n`);
+              return JSON.parse(pkgJson);
+            }
+          } catch {}
+          throw new Error(`Cannot require '${mod}' in browser context. Use: const mod = await import('https://esm.sh/${mod}')`);
+        },
         process: {
           env: { ...vfs.env },
           cwd: () => vfs.cwd,
           exit: (code) => { throw { exitCode: code }; },
-          argv: ['node', '-e'],
+          argv: ['node', '-e', ...args.slice(1)],
+          version: 'v20.0.0 (Foam)',
+          platform: 'browser',
         },
+        __dirname: vfs.cwd,
+        __filename: '<eval>',
+        global: globalThis,
         setTimeout, setInterval, clearTimeout, clearInterval,
         JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean,
         Map, Set, Promise, Symbol, Error, parseInt, parseFloat, isNaN, isFinite,
+        Buffer: {
+          from: (str) => new TextEncoder().encode(str),
+          toString: (buf) => new TextDecoder().decode(buf),
+        },
       };
       const fn = new Function(...Object.keys(sandbox), code);
       const result = fn(...Object.values(sandbox));
