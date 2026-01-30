@@ -1267,4 +1267,267 @@ commands.download = async (args, { stdout, stderr, vfs }) => {
   return 0;
 };
 
+// ─── HYPERCOMPACT (Token-efficient DOM navigation) ───────────────────────────
+
+// HCSession - Hypercompact navigation session
+class HCSession {
+  constructor(doc, source = 'page') {
+    this.doc = doc;
+    this.source = source;
+    this.current = doc.body || doc.documentElement;
+    this.lastResults = [];
+    this.lastGrid = null;
+    this.vars = {};
+  }
+
+  s() {
+    const name = this.source.split('/').pop();
+    const count = this.lastResults.length;
+    let depth = 0, el = this.current;
+    while (el && el !== this.doc.body && el !== this.doc.documentElement) { depth++; el = el.parentElement; }
+    const tag = this.current.tagName?.toLowerCase() || 'doc';
+    return `p:${name} c:${count} d:${depth} @${tag}`;
+  }
+
+  t(limit) {
+    let text = this.current.textContent.replace(/\s+/g, ' ').trim();
+    if (limit && text.length > limit) text = text.slice(0, limit) + '…';
+    return text;
+  }
+
+  q(selector, limit = 10) {
+    try {
+      const els = Array.from(this.doc.querySelectorAll(selector));
+      this.lastResults = els;
+      if (els.length === 0) return '∅';
+      return els.slice(0, limit).map((el, i) => {
+        const text = el.textContent.replace(/\s+/g, ' ').trim().slice(0, 60);
+        return `[${i}]${text}`;
+      }).join('\n');
+    } catch (e) { return '✗ ' + e.message; }
+  }
+
+  q1(selector) {
+    try {
+      const el = this.doc.querySelector(selector);
+      if (!el) return '∅';
+      this.current = el;
+      this.lastResults = [el];
+      return el.textContent.replace(/\s+/g, ' ').trim().slice(0, 200);
+    } catch (e) { return '✗ ' + e.message; }
+  }
+
+  n(index) {
+    if (index >= this.lastResults.length) return '✗ out of range';
+    this.current = this.lastResults[index];
+    return `✓ [${index}] ${this.current.textContent.replace(/\s+/g, ' ').trim().slice(0, 100)}`;
+  }
+
+  up(levels = 1) {
+    for (let i = 0; i < levels; i++) {
+      if (this.current.parentElement) this.current = this.current.parentElement;
+    }
+    return `✓ @${this.current.tagName?.toLowerCase()}`;
+  }
+
+  ch() {
+    const children = Array.from(this.current.children);
+    if (children.length === 0) return '∅ no children';
+    return children.slice(0, 15).map((c, i) => {
+      const tag = c.tagName.toLowerCase();
+      const cls = c.className ? '.' + String(c.className).split(' ')[0] : '';
+      return `[${i}]<${tag}${cls}>${c.textContent.replace(/\s+/g, ' ').trim().slice(0, 30)}`;
+    }).join('\n');
+  }
+
+  g(pattern, limit = 10) {
+    const lines = this.current.textContent.split('\n');
+    const regex = new RegExp(pattern, 'gi');
+    const matches = [];
+    lines.forEach((line, i) => {
+      if (regex.test(line)) {
+        const clean = line.replace(/\s+/g, ' ').trim();
+        if (clean) matches.push(`L${i + 1}: ${clean.slice(0, 60)}`);
+      }
+    });
+    return matches.length === 0 ? '∅ no matches' : matches.slice(0, limit).join('\n');
+  }
+
+  look() {
+    const interactive = this.current.querySelectorAll('a, button, input, select, textarea, [onclick], [href], .btn, [role="button"]');
+    const items = [];
+    interactive.forEach((el, idx) => {
+      const text = (el.textContent || el.value || el.placeholder || el.title || el.getAttribute('aria-label') || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 20);
+      if (text || el.tagName.toLowerCase() === 'input') {
+        items.push({ text: text || `[${el.type || 'input'}]`, el, idx });
+      }
+    });
+    this.lastGrid = items;
+    if (items.length === 0) return '∅ no interactive elements';
+    let out = `${items.length} elements\n`;
+    items.slice(0, 20).forEach((item, i) => {
+      const tag = item.el.tagName.toLowerCase();
+      const href = item.el.getAttribute('href');
+      out += `@${i} <${tag}> "${item.text}"${href ? ` →${href.slice(0, 25)}` : ''}\n`;
+    });
+    return out.trim();
+  }
+
+  click(index) {
+    if (!this.lastGrid || index >= this.lastGrid.length) return '✗ call look first or index out of range';
+    const item = this.lastGrid[index];
+    try { item.el.click(); } catch (e) { /* ignore */ }
+    return `✓ clicked "${item.text}"`;
+  }
+
+  a() {
+    if (!this.current.attributes) return '∅';
+    const attrs = [];
+    for (const attr of this.current.attributes) attrs.push(`${attr.name}=${attr.value.slice(0, 30)}`);
+    return attrs.length === 0 ? '∅ no attrs' : attrs.join(' ');
+  }
+
+  h(limit) {
+    let html = this.current.outerHTML;
+    if (limit && html.length > limit) html = html.slice(0, limit) + '…[truncated]';
+    return html;
+  }
+
+  store(name) {
+    this.vars[name] = this.current.textContent;
+    return `✓ $${name} (${this.vars[name].length} chars)`;
+  }
+
+  recall(expr) {
+    const match = expr.match(/^\$(\w+)(\.(\w+))?$/);
+    if (!match) return '✗ invalid var syntax';
+    const name = match[1], prop = match[3];
+    if (!this.vars[name]) return `✗ $${name} not set`;
+    if (prop === 'length') return String(this.vars[name].length);
+    if (prop) return '✗ unknown property';
+    return this.vars[name].slice(0, 500);
+  }
+
+  exec(cmd) {
+    cmd = cmd.trim();
+    let m;
+
+    // Batch
+    if (cmd.includes(';') && !cmd.startsWith(';')) {
+      return cmd.split(';').map(c => c.trim()).filter(Boolean).map(c => this.exec(c)).join('\n---\n');
+    }
+
+    if (cmd === 's') return this.s();
+    if (cmd === 't') return this.t();
+    if ((m = cmd.match(/^t(\d+)$/))) return this.t(parseInt(m[1]));
+    if (cmd.startsWith('q1 ')) return this.q1(cmd.slice(3).trim());
+    if (cmd.startsWith('q ')) return this.q(cmd.slice(2).trim());
+    if ((m = cmd.match(/^n(\d+)$/))) return this.n(parseInt(m[1]));
+    if (cmd === 'up') return this.up();
+    if ((m = cmd.match(/^up(\d+)$/))) return this.up(parseInt(m[1]));
+    if (cmd === 'ch') return this.ch();
+    if (cmd.startsWith('g ')) return this.g(cmd.slice(2).trim());
+    if (cmd === 'look') return this.look();
+    if ((m = cmd.match(/^@(\d+)$/))) return this.click(parseInt(m[1]));
+    if (cmd === 'a') return this.a();
+    if (cmd === 'h') return this.h();
+    if ((m = cmd.match(/^h(\d+)$/))) return this.h(parseInt(m[1]));
+    if ((m = cmd.match(/^>\$(\w+)$/))) return this.store(m[1]);
+    if ((m = cmd.match(/^(\$\w+(\.\w+)?)$/))) return this.recall(m[1]);
+
+    return `✗ unknown: ${cmd}`;
+  }
+}
+
+// Initialize global HC state
+if (typeof window !== 'undefined' && !window.__hc) {
+  window.__hc = { session: null, HCSession };
+}
+
+commands.hc = async (args, { stdout, stderr, vfs }) => {
+  const sub = args[0];
+
+  if (!sub) {
+    stdout(`Hypercompact - Token-efficient DOM navigation
+
+Usage:
+  hc open <file>     Load HTML file from VFS
+  hc live            Attach to live page DOM
+  hc <cmd>           Run HC command
+
+Commands:
+  s              State: "p:file c:N d:N @tag"
+  t, t100        Text content (optional limit)
+  q <sel>        Query all matching elements
+  q1 <sel>       Query one, set as current
+  n<N>           Select Nth from results
+  up, up<N>      Go to parent element
+  ch             Show children
+  g <pattern>    Grep for text
+  look           List interactive elements
+  @<N>           Click Nth element
+  a              Show attributes
+  h, h<N>        Show HTML
+  >$name         Store to variable
+  $name          Recall variable
+
+Example:
+  hc open page.html
+  hc t100
+  hc q .price
+  hc n0
+  hc a
+`);
+    return 0;
+  }
+
+  // Open file from VFS
+  if (sub === 'open') {
+    const file = args[1];
+    if (!file) { stderr('hc open: missing file\n'); return 1; }
+    try {
+      const html = await vfs.readFile(file);
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      window.__hc.session = new HCSession(doc, file);
+      stdout(`✓ opened ${file} (${html.length} chars)\n`);
+      return 0;
+    } catch (e) {
+      stderr(`hc open: ${e.message}\n`);
+      return 1;
+    }
+  }
+
+  // Attach to live DOM (careful!)
+  if (sub === 'live') {
+    window.__hc.session = new HCSession(document, 'live');
+    stdout('✓ attached to live DOM\n');
+    return 0;
+  }
+
+  // Close session
+  if (sub === 'close') {
+    window.__hc.session = null;
+    stdout('✓ session closed\n');
+    return 0;
+  }
+
+  // Run HC command
+  if (!window.__hc.session) {
+    stderr('hc: no session. Use "hc open <file>" or "hc live" first.\n');
+    return 1;
+  }
+
+  const cmd = args.join(' ');
+  const result = window.__hc.session.exec(cmd);
+  stdout(result + '\n');
+  return 0;
+};
+
+// Expose hc() global function for skyeyes
+if (typeof window !== 'undefined') {
+  window.hc = (cmd) => window.__hc.session ? window.__hc.session.exec(cmd) : '✗ no session';
+}
+
 export default commands;
