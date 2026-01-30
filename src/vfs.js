@@ -440,17 +440,56 @@ class VFS {
   }
 
   // Build fs.promises-compatible API for isomorphic-git
+  // Binary data is stored as base64 with a \x00BIN: prefix to distinguish from text
   toIsomorphicGitFS() {
     const vfs = this;
+    const BIN_PREFIX = '\x00BIN:';
+
+    function encodeBinary(uint8arr) {
+      // Convert Uint8Array to base64 string for IndexedDB storage
+      let binary = '';
+      for (let i = 0; i < uint8arr.length; i++) {
+        binary += String.fromCharCode(uint8arr[i]);
+      }
+      return BIN_PREFIX + btoa(binary);
+    }
+
+    function decodeBinary(stored) {
+      // Decode base64 back to Uint8Array
+      const b64 = stored.slice(BIN_PREFIX.length);
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
     return {
       promises: {
         readFile: async (p, opts) => {
           const content = await vfs.readFile(p);
-          if (opts === 'utf8' || opts?.encoding === 'utf8') return content;
+          if (opts === 'utf8' || opts?.encoding === 'utf8') {
+            // If binary-encoded, decode and convert to utf8
+            if (content && content.startsWith(BIN_PREFIX)) {
+              return new TextDecoder().decode(decodeBinary(content));
+            }
+            return content;
+          }
+          // Return as Uint8Array
+          if (content && content.startsWith(BIN_PREFIX)) {
+            return decodeBinary(content);
+          }
           return new TextEncoder().encode(content);
         },
         writeFile: async (p, data, opts) => {
-          const str = typeof data === 'string' ? data : new TextDecoder().decode(data);
+          let str;
+          if (typeof data === 'string') {
+            str = data;
+          } else {
+            // Binary data (Uint8Array/Buffer) - store as base64
+            str = encodeBinary(data instanceof Uint8Array ? data : new Uint8Array(data));
+          }
           const parentPath = p.substring(0, p.lastIndexOf('/')) || '/';
           if (parentPath !== '/' && !(await vfs.exists(parentPath))) {
             await vfs.mkdir(parentPath, { recursive: true });

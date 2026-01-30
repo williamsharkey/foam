@@ -14,7 +14,7 @@
     import Shell from './src/shell.js';
     import Terminal from './src/terminal.js';
     import ClaudeClient from './src/claude.js';
-    import FoamProvider from './src/foam-provider.js';
+    import { SpiritAgent, FoamProvider } from './spirit/dist/spirit.js';
     // Register shared coreutils from fluffycoreutils
     import { registerFluffyCommands } from './src/fluffy-bridge.js';
     // devtools.js registers git/npm/node into commands on import
@@ -35,25 +35,66 @@
       const container = document.getElementById('terminal');
       const terminal = new Terminal(container, shell);
 
-      // Initialize Claude client
+      // Initialize Claude client (legacy)
       const claude = new ClaudeClient(shell, terminal);
       terminal.claudeClient = claude;
       terminal.onConfigChange = () => {
         claude.setApiKey(localStorage.getItem('foam_api_key') || '');
       };
 
-      // Create FoamProvider (ready for Spirit integration)
+      // Create Spirit provider and agent
       const provider = new FoamProvider(vfs, shell, terminal);
+      const apiKey = localStorage.getItem('foam_api_key') || '';
+      const spirit = apiKey ? new SpiritAgent(provider, {
+        apiKey,
+        onText: (text) => terminal.write(text),
+        onToolStart: (name, input) => {
+          terminal.write(`\x1b[36m► ${name}\x1b[0m`);
+          if (name === 'bash' && input.command) {
+            terminal.write(`: ${input.command}`);
+          }
+          terminal.write('\n');
+        },
+        onToolEnd: () => {},
+        onError: (err) => terminal.writeError(`Error: ${err.message}\n`),
+      }) : null;
+      terminal.spiritAgent = spirit;
+
+      // Rebuild Spirit agent when API key changes
+      const origOnConfigChange = terminal.onConfigChange;
+      terminal.onConfigChange = () => {
+        origOnConfigChange?.();
+        const key = localStorage.getItem('foam_api_key') || '';
+        if (key) {
+          terminal.spiritAgent = new SpiritAgent(provider, {
+            apiKey: key,
+            onText: (text) => terminal.write(text),
+            onToolStart: (name, input) => {
+              terminal.write(`\x1b[36m► ${name}\x1b[0m`);
+              if (name === 'bash' && input.command) {
+                terminal.write(`: ${input.command}`);
+              }
+              terminal.write('\n');
+            },
+            onToolEnd: () => {},
+            onError: (err) => terminal.writeError(`Error: ${err.message}\n`),
+          });
+        }
+      };
 
       // Expose global for test automation (windwalker) and Spirit integration
-      window.__foam = { vfs, shell, terminal, claude, provider };
+      window.__foam = { vfs, shell, terminal, claude, provider, spirit };
       window.dispatchEvent(new CustomEvent('foam:ready', { detail: window.__foam }));
 
-      // Boot message - styled box like Shiro
+      // Boot message
       terminal.write('\x1b[36m╔═══════════════════════════════════════════════╗\x1b[0m\n');
       terminal.write('\x1b[36m║\x1b[0m   \x1b[1;97mFoam OS\x1b[0m \x1b[95mv0.1.0\x1b[0m                            \x1b[36m║\x1b[0m\n');
       terminal.write('\x1b[36m║\x1b[0m   \x1b[92mBrowser-Native Virtual OS\x1b[0m                 \x1b[36m║\x1b[0m\n');
-      terminal.write('\x1b[36m║\x1b[0m   Type \x1b[33mhelp\x1b[0m for available commands          \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m                                               \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[33mhelp\x1b[0m        — list all commands             \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[33mspirit\x1b[0m      — AI coding agent (Claude)      \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[33mupload\x1b[0m      — upload files from host        \x1b[36m║\x1b[0m\n');
+      terminal.write('\x1b[36m║\x1b[0m   \x1b[33mdownload\x1b[0m    — download files to host        \x1b[36m║\x1b[0m\n');
       terminal.write('\x1b[36m╚═══════════════════════════════════════════════╝\x1b[0m\n');
       terminal.write('\n');
     }

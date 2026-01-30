@@ -94,7 +94,9 @@ commands.help = async (args, { stdout }) => {
   stdout('Dev tools:     git, npm, npx, node, python, pip, ed\n');
   stdout('Job control:   jobs, fg, bg (use & for background)\n');
   stdout('Environment:   env, export, printenv, unset\n');
-  stdout('Claude:        claude "your message"\n');
+  stdout('AI assistant:  spirit "your message" (Claude Code agent)\n');
+  stdout('Legacy AI:     claude "your message" (direct API)\n');
+  stdout('File transfer: upload [dir], download <file>\n');
   stdout('Config:        foam config set api_key <key>\n');
   return 0;
 };
@@ -685,6 +687,549 @@ commands.unset = async (args, { stderr, vfs }) => {
     delete vfs.env[key];
   }
 
+  return 0;
+};
+
+// ─── XARGS ──────────────────────────────────────────────────────────────────
+
+commands.xargs = async (args, { stdin, stdout, stderr, vfs, env, terminal, exec }) => {
+  if (!stdin) { stderr('xargs: no stdin\n'); return 1; }
+  if (!exec) { stderr('xargs: no exec context\n'); return 1; }
+
+  // Parse flags
+  let cmdTemplate = args.length > 0 ? args : ['echo'];
+  let delimiter = '\n';
+  let maxArgs = Infinity;
+  let replaceStr = null;
+  let i = 0;
+
+  while (i < args.length) {
+    if (args[i] === '-d' && args[i + 1]) { delimiter = args[i + 1]; i += 2; continue; }
+    if (args[i] === '-n' && args[i + 1]) { maxArgs = parseInt(args[i + 1]); i += 2; continue; }
+    if (args[i] === '-I' && args[i + 1]) { replaceStr = args[i + 1]; i += 2; continue; }
+    if (args[i] === '-0') { delimiter = '\0'; i++; continue; }
+    break;
+  }
+  cmdTemplate = args.slice(i);
+  if (cmdTemplate.length === 0) cmdTemplate = ['echo'];
+
+  // Split stdin into items
+  const items = stdin.split(delimiter === '\n' ? /\r?\n/ : delimiter).filter(s => s.trim());
+
+  let lastExit = 0;
+  if (replaceStr) {
+    // -I mode: run command once per item, replacing {} with item
+    for (const item of items) {
+      const cmd = cmdTemplate.map(a => a.replace(replaceStr, item)).join(' ');
+      const result = await exec(cmd);
+      if (result.stdout) stdout(result.stdout);
+      if (result.stderr) stderr(result.stderr);
+      lastExit = result.exitCode;
+    }
+  } else {
+    // Batch mode: group items into batches of maxArgs
+    for (let j = 0; j < items.length; j += maxArgs) {
+      const batch = items.slice(j, j + maxArgs);
+      const cmd = cmdTemplate.join(' ') + ' ' + batch.map(s => `"${s}"`).join(' ');
+      const result = await exec(cmd);
+      if (result.stdout) stdout(result.stdout);
+      if (result.stderr) stderr(result.stderr);
+      lastExit = result.exitCode;
+    }
+  }
+
+  return lastExit;
+};
+
+// ─── LESS / MORE (pager) ────────────────────────────────────────────────────
+
+commands.less = async (args, { stdin, stdout, stderr, vfs }) => {
+  let content = '';
+
+  if (args.length > 0) {
+    // Read from file
+    const filename = args[args.length - 1];
+    if (filename.startsWith('-')) {
+      // flags only, read from stdin
+      content = stdin || '';
+    } else {
+      try {
+        content = await vfs.readFile(filename);
+      } catch (err) {
+        stderr(`less: ${err.message}\n`);
+        return 1;
+      }
+    }
+  } else if (stdin) {
+    content = stdin;
+  } else {
+    stderr('less: missing filename or stdin\n');
+    return 1;
+  }
+
+  // In browser terminal, we output with line numbers for context
+  const lines = content.split('\n');
+  const showLineNumbers = args.includes('-N');
+
+  for (let i = 0; i < lines.length; i++) {
+    if (showLineNumbers) {
+      stdout(`${String(i + 1).padStart(6)} ${lines[i]}\n`);
+    } else {
+      stdout(lines[i] + '\n');
+    }
+  }
+
+  return 0;
+};
+
+commands.more = commands.less;
+
+// ─── MAKE (basic) ───────────────────────────────────────────────────────────
+
+commands.make = async (args, { stdout, stderr, vfs, exec }) => {
+  if (!exec) { stderr('make: no exec context\n'); return 1; }
+
+  const target = args[0] || 'all';
+  let makefilePath = 'Makefile';
+
+  // Check for -f flag
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-f' && args[i + 1]) { makefilePath = args[i + 1]; break; }
+  }
+
+  let content;
+  try {
+    content = await vfs.readFile(makefilePath);
+  } catch {
+    stderr(`make: *** No targets specified and no makefile found. Stop.\n`);
+    return 2;
+  }
+
+  // Parse Makefile
+  const targets = {};
+  const lines = content.split('\n');
+  let currentTarget = null;
+
+  for (const line of lines) {
+    if (line.startsWith('#') || line.trim() === '') continue;
+
+    // Target line: name: deps
+    const targetMatch = line.match(/^([A-Za-z0-9._-]+)\s*:\s*(.*)$/);
+    if (targetMatch && !line.startsWith('\t')) {
+      currentTarget = targetMatch[1];
+      targets[currentTarget] = {
+        deps: targetMatch[2].trim().split(/\s+/).filter(s => s),
+        commands: []
+      };
+      continue;
+    }
+
+    // Recipe line (starts with tab)
+    if ((line.startsWith('\t') || line.startsWith('  ')) && currentTarget) {
+      targets[currentTarget].commands.push(line.trim());
+    }
+  }
+
+  // Execute target
+  const executed = new Set();
+
+  async function runTarget(name) {
+    if (executed.has(name)) return 0;
+    executed.add(name);
+
+    const t = targets[name];
+    if (!t) {
+      stderr(`make: *** No rule to make target '${name}'. Stop.\n`);
+      return 2;
+    }
+
+    // Run dependencies first
+    for (const dep of t.deps) {
+      if (targets[dep]) {
+        const result = await runTarget(dep);
+        if (result !== 0) return result;
+      }
+    }
+
+    // Run commands
+    for (const cmd of t.commands) {
+      const silent = cmd.startsWith('@');
+      const actualCmd = silent ? cmd.slice(1) : cmd;
+      if (!silent) stdout(`${actualCmd}\n`);
+      const result = await exec(actualCmd);
+      if (result.stdout) stdout(result.stdout);
+      if (result.stderr) stderr(result.stderr);
+      if (result.exitCode !== 0) {
+        stderr(`make: *** [${name}] Error ${result.exitCode}\n`);
+        return 2;
+      }
+    }
+
+    return 0;
+  }
+
+  return runTarget(target);
+};
+
+// ─── TRUE / FALSE ───────────────────────────────────────────────────────────
+
+commands.true = async () => 0;
+commands.false = async () => 1;
+
+// ─── READ (shell builtin for reading input) ─────────────────────────────────
+
+commands.read = async (args, { stdin, vfs, stderr }) => {
+  // read VAR — reads a line from stdin into VAR
+  if (args.length === 0) { stderr('read: missing variable name\n'); return 1; }
+
+  const varName = args[args.length - 1];
+  let prompt = '';
+
+  // Check for -p flag
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === '-p' && args[i + 1]) { prompt = args[i + 1]; i++; }
+  }
+
+  // Read from stdin
+  const value = stdin ? stdin.split('\n')[0] : '';
+  vfs.env[varName] = value;
+  return 0;
+};
+
+// ─── PRINTF ─────────────────────────────────────────────────────────────────
+
+commands.printf = async (args, { stdout }) => {
+  if (args.length === 0) return 0;
+  const format = args[0];
+  const fmtArgs = args.slice(1);
+
+  let result = '';
+  let argIdx = 0;
+
+  for (let i = 0; i < format.length; i++) {
+    if (format[i] === '\\') {
+      i++;
+      switch (format[i]) {
+        case 'n': result += '\n'; break;
+        case 't': result += '\t'; break;
+        case '\\': result += '\\'; break;
+        case '0': result += '\0'; break;
+        default: result += '\\' + format[i]; break;
+      }
+    } else if (format[i] === '%') {
+      i++;
+      if (format[i] === 's') { result += fmtArgs[argIdx++] || ''; }
+      else if (format[i] === 'd') { result += parseInt(fmtArgs[argIdx++] || '0'); }
+      else if (format[i] === '%') { result += '%'; }
+      else { result += '%' + format[i]; }
+    } else {
+      result += format[i];
+    }
+  }
+
+  stdout(result);
+  return 0;
+};
+
+// ─── TEST COMMAND (for shell scripting conditionals) ───────────────────────
+
+commands.test = async (args, { vfs }) => {
+  if (args.length === 0) return 1;
+
+  // Unary operators
+  if (args.length === 2) {
+    const op = args[0];
+    const arg = args[1];
+
+    switch (op) {
+      case '-z': return arg === '' ? 0 : 1; // String is empty
+      case '-n': return arg !== '' ? 0 : 1; // String is not empty
+      case '-e': return await vfs.exists(arg) ? 0 : 1; // File exists
+      case '-f': {
+        try {
+          const stat = await vfs.stat(arg);
+          return stat.type === 'file' ? 0 : 1;
+        } catch { return 1; }
+      }
+      case '-d': {
+        try {
+          const stat = await vfs.stat(arg);
+          return stat.type === 'dir' ? 0 : 1;
+        } catch { return 1; }
+      }
+      case '-r': return await vfs.exists(arg) ? 0 : 1; // File is readable
+      case '-w': return await vfs.exists(arg) ? 0 : 1; // File is writable
+      case '-x': return await vfs.exists(arg) ? 0 : 1; // File is executable
+      case '!': {
+        // Negation - recursively test rest
+        return await commands.test(args.slice(1), { vfs }) === 0 ? 1 : 0;
+      }
+    }
+  }
+
+  // Binary operators
+  if (args.length === 3) {
+    const left = args[0];
+    const op = args[1];
+    const right = args[2];
+
+    switch (op) {
+      case '=':
+      case '==': return left === right ? 0 : 1;
+      case '!=': return left !== right ? 0 : 1;
+      case '-eq': return parseInt(left) === parseInt(right) ? 0 : 1;
+      case '-ne': return parseInt(left) !== parseInt(right) ? 0 : 1;
+      case '-lt': return parseInt(left) < parseInt(right) ? 0 : 1;
+      case '-le': return parseInt(left) <= parseInt(right) ? 0 : 1;
+      case '-gt': return parseInt(left) > parseInt(right) ? 0 : 1;
+      case '-ge': return parseInt(left) >= parseInt(right) ? 0 : 1;
+    }
+  }
+
+  // Logical operators (AND/OR)
+  if (args.length > 3) {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-a') {
+        // AND: test left AND right
+        const leftResult = await commands.test(args.slice(0, i), { vfs });
+        if (leftResult !== 0) return 1;
+        return commands.test(args.slice(i + 1), { vfs });
+      }
+      if (args[i] === '-o') {
+        // OR: test left OR right
+        const leftResult = await commands.test(args.slice(0, i), { vfs });
+        if (leftResult === 0) return 0;
+        return commands.test(args.slice(i + 1), { vfs });
+      }
+    }
+  }
+
+  // Default: treat as non-empty string test
+  const str = args.join(' ');
+  return str.trim() !== '' ? 0 : 1;
+};
+
+// ─── SPIRIT (AI coding agent) ────────────────────────────────────────────────
+
+commands.spirit = async (args, { stdout, stderr, vfs }) => {
+  const prompt = args.join(' ').replace(/^["']|["']$/g, '');
+
+  // Check for API key
+  const apiKey = vfs.env['ANTHROPIC_API_KEY'] || localStorage.getItem('foam_api_key') || '';
+  if (!apiKey) {
+    stdout([
+      'Spirit - AI Coding Agent for Foam OS',
+      '',
+      'Spirit is not configured. To set up:',
+      '',
+      '  foam config set api_key sk-ant-your-key-here',
+      '  # or',
+      '  export ANTHROPIC_API_KEY=sk-ant-your-key-here',
+      '',
+      '  spirit "your prompt here"',
+      '',
+      'Spirit uses Claude to read, write, and edit files',
+      'in your Foam filesystem with access to all shell commands.',
+      '',
+      'Slash commands: /help, /clear, /model, /stats, /thinking, /cost',
+      '',
+    ].join('\n'));
+    return 1;
+  }
+
+  if (!prompt) {
+    stdout('Usage: spirit "your message"\n');
+    stdout('Spirit slash commands: /help, /clear, /compact, /stats\n');
+    return 0;
+  }
+
+  // Get or create Spirit agent from global state
+  const foam = window.__foam;
+  if (!foam || !foam.provider) {
+    stderr('spirit: Foam not fully initialized\n');
+    return 1;
+  }
+
+  try {
+    // Dynamically import SpiritAgent if not already available
+    let SpiritAgent = foam._SpiritAgent;
+    if (!SpiritAgent) {
+      const mod = await import('../spirit/dist/spirit.js');
+      SpiritAgent = mod.SpiritAgent;
+      foam._SpiritAgent = SpiritAgent;
+    }
+
+    const agent = new SpiritAgent(foam.provider, {
+      apiKey,
+      model: vfs.env['SPIRIT_MODEL'] || 'claude-sonnet-4-20250514',
+      maxTurns: parseInt(vfs.env['SPIRIT_MAX_TURNS'] || '30', 10),
+      maxTokens: parseInt(vfs.env['SPIRIT_MAX_TOKENS'] || '8192', 10),
+      thinkingBudget: vfs.env['SPIRIT_THINKING']
+        ? parseInt(vfs.env['SPIRIT_THINKING'], 10)
+        : undefined,
+      onText: (text) => stdout(text),
+      onThinking: (thinking) => stdout(`\x1b[2m${thinking}\x1b[0m`),
+      onToolStart: (name, input) => {
+        const summary = name === 'Bash' || name === 'bash'
+          ? `$ ${input.command}`
+          : name === 'Read' || name === 'read_file'
+            ? `Reading ${input.file_path || input.path}`
+            : name === 'Write' || name === 'write_file'
+              ? `Writing ${input.file_path || input.path}`
+              : name === 'Edit' || name === 'edit_file'
+                ? `Editing ${input.file_path || input.path}`
+                : name === 'Glob' || name === 'glob'
+                  ? `Glob ${input.pattern}`
+                  : `${name}`;
+        stdout(`\x1b[36m⟫ ${summary}\x1b[0m\n`);
+      },
+      onToolEnd: () => {},
+      onError: (error) => stderr(`\x1b[31mError: ${error.message}\x1b[0m\n`),
+    });
+
+    // Handle slash commands
+    if (prompt.startsWith('/')) {
+      const { handled, output } = await agent.handleSlashCommand(prompt);
+      if (handled) {
+        if (output) stdout(output + '\n');
+        return 0;
+      }
+    }
+
+    await agent.run(prompt);
+    stdout('\n');
+    return 0;
+  } catch (e) {
+    stderr(`spirit: ${e.message || e}\n`);
+    if (e.stack) stderr(`${e.stack}\n`);
+    return 1;
+  }
+};
+
+// ─── CLAUDE (legacy direct API client) ───────────────────────────────────────
+
+commands.claude = async (args, { stdout, stderr, vfs }) => {
+  const prompt = args.join(' ').replace(/^["']|["']$/g, '');
+
+  const apiKey = vfs.env['ANTHROPIC_API_KEY'] || localStorage.getItem('foam_api_key') || '';
+  if (!apiKey) {
+    stderr('No API key set. Run: foam config set api_key YOUR_KEY\n');
+    return 1;
+  }
+
+  if (!prompt) {
+    stdout('Usage: claude "your message"\n');
+    return 0;
+  }
+
+  const foam = window.__foam;
+  if (foam && foam.claude) {
+    foam.claude.setApiKey(apiKey);
+    await foam.claude.chat(prompt);
+    return 0;
+  }
+
+  stderr('claude: client not initialized\n');
+  return 1;
+};
+
+// ─── FOAM CONFIG ─────────────────────────────────────────────────────────────
+
+commands.foam = async (args, { stdout, stderr }) => {
+  if (args[0] === 'config' && args[1] === 'set' && args[2] === 'api_key' && args[3]) {
+    localStorage.setItem('foam_api_key', args[3]);
+    stdout('API key saved.\n');
+    return 0;
+  }
+  if (args[0] === 'config' && args[1] === 'get' && args[2] === 'api_key') {
+    const key = localStorage.getItem('foam_api_key');
+    stdout(key ? 'sk-ant-...' + key.slice(-8) + '\n' : '(not set)\n');
+    return 0;
+  }
+  stdout('Usage:\n');
+  stdout('  foam config set api_key <key>\n');
+  stdout('  foam config get api_key\n');
+  return 0;
+};
+
+// ─── UPLOAD / DOWNLOAD ───────────────────────────────────────────────────────
+
+commands.upload = async (args, { stdout, stderr, vfs }) => {
+  const targetDir = args[0] || '.';
+
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.style.display = 'none';
+    document.body.appendChild(input);
+
+    input.addEventListener('change', async () => {
+      const files = input.files;
+      if (!files || files.length === 0) {
+        stdout('No files selected.\n');
+        document.body.removeChild(input);
+        resolve(0);
+        return;
+      }
+
+      for (const file of files) {
+        try {
+          const content = await file.text();
+          const destPath = targetDir === '.'
+            ? file.name
+            : `${targetDir}/${file.name}`;
+          await vfs.writeFile(destPath, content);
+          stdout(`Uploaded: ${destPath} (${file.size} bytes)\n`);
+        } catch (err) {
+          stderr(`Failed to upload ${file.name}: ${err.message}\n`);
+        }
+      }
+      document.body.removeChild(input);
+      resolve(0);
+    });
+
+    input.addEventListener('cancel', () => {
+      stdout('Upload cancelled.\n');
+      document.body.removeChild(input);
+      resolve(0);
+    });
+
+    // Timeout fallback in case no event fires
+    setTimeout(() => {
+      if (document.body.contains(input)) {
+        document.body.removeChild(input);
+      }
+    }, 120000);
+
+    input.click();
+  });
+};
+
+commands.download = async (args, { stdout, stderr, vfs }) => {
+  if (args.length === 0) {
+    stderr('Usage: download <file> [file2 ...]\n');
+    return 1;
+  }
+
+  for (const filePath of args) {
+    try {
+      const content = await vfs.readFile(filePath);
+      const blob = new Blob([content], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filePath.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      stdout(`Downloaded: ${filePath}\n`);
+    } catch (err) {
+      stderr(`download: ${err.message}\n`);
+      return 1;
+    }
+  }
   return 0;
 };
 

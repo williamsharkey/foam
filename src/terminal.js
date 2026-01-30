@@ -51,7 +51,8 @@ class Terminal {
     const cwd = this.shell.vfs.cwd;
     const home = this.shell.vfs.env.HOME;
     const display = cwd.startsWith(home) ? '~' + cwd.slice(home.length) : cwd;
-    this.promptStr = `user@foam:${display}$ `;
+    const user = this.shell.vfs.env.USER || 'user';
+    this.promptStr = `${user}@foam:${display}$ `;
     this.promptEl.textContent = this.promptStr;
   }
 
@@ -158,17 +159,10 @@ class Terminal {
     this.abortController = new AbortController();
 
     try {
-      // Handle built-in 'claude' command
-      if (cmd.trim().startsWith('claude ') || cmd.trim() === 'claude') {
-        await this._runClaude(cmd.trim());
-      } else if (cmd.trim().startsWith('foam ')) {
-        await this._runFoamConfig(cmd.trim());
-      } else {
-        await this.shell.execLive(cmd, {
-          stdout: (t) => this.write(t),
-          stderr: (t) => this.writeError(t),
-        });
-      }
+      await this.shell.execLive(cmd, {
+        stdout: (t) => this.write(t),
+        stderr: (t) => this.writeError(t),
+      });
     } catch (err) {
       this.writeError(err.message + '\n');
     }
@@ -178,6 +172,33 @@ class Terminal {
     this.abortController = null;
     this._updatePrompt();
     this.focus();
+  }
+
+  async _runSpirit(cmd) {
+    const msg = cmd.slice(6).trim() || null;
+    if (!this.spiritAgent) {
+      this.writeError('Spirit not configured. Run: foam config set api_key YOUR_KEY\n');
+      return;
+    }
+    if (!msg) {
+      this.writeLine('Usage: spirit "your message"');
+      this.writeLine('Spirit slash commands: /help, /clear, /compact, /stats');
+      return;
+    }
+    // Strip surrounding quotes
+    const cleaned = msg.replace(/^["']|["']$/g, '');
+
+    // Handle slash commands
+    if (cleaned.startsWith('/')) {
+      const { handled, output } = await this.spiritAgent.handleSlashCommand(cleaned);
+      if (handled) {
+        if (output) this.write(output + '\n');
+        return;
+      }
+    }
+
+    await this.spiritAgent.run(cleaned);
+    this.write('\n');
   }
 
   async _runClaude(cmd) {

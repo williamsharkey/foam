@@ -204,9 +204,13 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
       }
 
       case 'clone': {
-        const url = subArgs[0];
-        if (!url) { stderr('error: must specify repository URL\n'); return 1; }
-        const repoName = url.split('/').pop()?.replace(/\.git$/, '') || 'repo';
+        let cloneUrl = subArgs[0];
+        if (!cloneUrl) { stderr('error: must specify repository URL\n'); return 1; }
+        // Normalize URL: add https:// if no protocol
+        if (!cloneUrl.startsWith('http://') && !cloneUrl.startsWith('https://') && !cloneUrl.startsWith('git://')) {
+          cloneUrl = 'https://' + cloneUrl;
+        }
+        const repoName = cloneUrl.split('/').pop()?.replace(/\.git$/, '') || 'repo';
         const targetDir = subArgs[1]
           ? vfs.resolvePath(subArgs[1])
           : vfs.resolvePath(repoName);
@@ -219,12 +223,34 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
           // Ignore if already exists
         }
         stdout(`Cloning into '${repoName}'...\n`);
-        await git.clone({
-          fs, http, dir: targetDir, url,
-          corsProxy: 'https://cors.isomorphic-git.org',
-          singleBranch: true,
-          depth: 1,
-        });
+
+        // Configurable CORS proxy with timeout
+        const corsProxy = vfs.env.GIT_CORS_PROXY || 'https://cors.isomorphic-git.org';
+        const cloneWithTimeout = (proxy) => {
+          return Promise.race([
+            git.clone({
+              fs, http, dir: targetDir, url: cloneUrl,
+              corsProxy: proxy,
+              singleBranch: true,
+              depth: 1,
+            }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('clone timed out')), 30000)
+            ),
+          ]);
+        };
+
+        try {
+          await cloneWithTimeout(corsProxy);
+        } catch (firstErr) {
+          if (corsProxy !== 'https://cors.isomorphic-git.org') {
+            stdout(`Proxy failed (${firstErr.message}), retrying with fallback...\n`);
+            await cloneWithTimeout('https://cors.isomorphic-git.org');
+          } else {
+            throw firstErr;
+          }
+        }
+
         stdout('done.\n');
         break;
       }
@@ -664,70 +690,219 @@ async function installPackage(pkgName, version, vfs, stdout, stderr) {
 // ─── NODE ───────────────────────────────────────────────────────────────────
 
 commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
-  // Helper to resolve and load a module
-  async function loadModule(modulePath) {
-    // Try to resolve the module
+  // File content cache for synchronous access (pre-loaded from VFS)
+  const fileCache = new Map();
+
+  // Module cache to prevent circular dependencies and duplicate loading
+  const moduleCache = new Map();
+
+  // Helper to pre-load file into cache
+  async function cacheFile(path) {
+    try {
+      const content = await vfs.readFile(path);
+      fileCache.set(path, content);
+      return content;
+    } catch {
+      return null;
+    }
+  }
+
+  // Helper to resolve module path
+  async function resolveModulePath(modulePath, fromDir) {
     let resolvedPath = modulePath;
 
     // Check if it's a relative/absolute path
     if (modulePath.startsWith('./') || modulePath.startsWith('../') || modulePath.startsWith('/')) {
-      // Resolve relative to current directory
-      resolvedPath = vfs.resolvePath(modulePath, vfs.cwd);
-
-      // Add .js extension if missing
-      if (!resolvedPath.endsWith('.js') && !resolvedPath.endsWith('.json')) {
-        try {
-          await vfs.readFile(resolvedPath + '.js');
-          resolvedPath += '.js';
-        } catch {
-          try {
-            await vfs.readFile(resolvedPath + '/index.js');
-            resolvedPath += '/index.js';
-          } catch {
-            // Try as-is
-          }
-        }
-      }
+      // Resolve relative to fromDir
+      resolvedPath = vfs.resolvePath(modulePath, fromDir);
     } else {
-      // Try to load from node_modules
-      const nodeModulesPath = `node_modules/${modulePath}`;
+      // Try to load from node_modules (use absolute path)
+      const nmBase = fromDir && fromDir.startsWith('/') ? fromDir : vfs.cwd;
+      const nodeModulesPath = `${nmBase}/node_modules/${modulePath}`;
 
+      // Check if package.json exists
       try {
-        // Check if package.json exists
         const pkgJsonPath = `${nodeModulesPath}/package.json`;
-        const pkgJson = JSON.parse(await vfs.readFile(pkgJsonPath));
-        const mainFile = pkgJson.main || 'index.js';
-        resolvedPath = `${nodeModulesPath}/${mainFile}`;
+        let pkgJson = fileCache.get(pkgJsonPath);
+        if (!pkgJson) {
+          pkgJson = await cacheFile(pkgJsonPath);
+        }
+        if (pkgJson) {
+          const pkg = JSON.parse(pkgJson);
+          const mainFile = pkg.main || 'index.js';
+          resolvedPath = `${nodeModulesPath}/${mainFile}`;
+        } else {
+          resolvedPath = `${nodeModulesPath}/index.js`;
+        }
       } catch {
         // Fallback to index.js
         resolvedPath = `${nodeModulesPath}/index.js`;
       }
     }
 
-    // Load the file
-    try {
-      const content = await vfs.readFile(resolvedPath);
-
-      // Check if it's JSON
-      if (resolvedPath.endsWith('.json')) {
-        return JSON.parse(content);
+    // Add .js extension if missing
+    if (!resolvedPath.endsWith('.js') && !resolvedPath.endsWith('.json')) {
+      // Try with .js extension
+      if (await cacheFile(resolvedPath + '.js')) {
+        resolvedPath += '.js';
+      } else if (await cacheFile(resolvedPath + '/index.js')) {
+        // Try as directory with index.js
+        resolvedPath += '/index.js';
       }
-
-      // For .js files, we need to evaluate them
-      // For now, return a placeholder that tells users to use dynamic import
-      return {
-        __foam_module: true,
-        __path: resolvedPath,
-        __help: `Module loaded from ${resolvedPath}. Use dynamic import() for ES modules.`
-      };
-    } catch (err) {
-      throw new Error(`Cannot find module '${modulePath}': ${err.message}`);
     }
+
+    // Ensure file is cached
+    if (!fileCache.has(resolvedPath)) {
+      await cacheFile(resolvedPath);
+    }
+
+    return resolvedPath;
+  }
+
+  // Helper to load and execute a CommonJS module (synchronous after pre-caching)
+  function requireModule(modulePath, fromDir = vfs.cwd) {
+    // Note: This assumes resolveModulePath was already called and file is cached
+    // For synchronous operation, we do simpler resolution
+    let resolvedPath = modulePath;
+
+    if (modulePath.startsWith('./') || modulePath.startsWith('../') || modulePath.startsWith('/')) {
+      resolvedPath = vfs.resolvePath(modulePath, fromDir);
+      if (!resolvedPath.endsWith('.js') && !resolvedPath.endsWith('.json')) {
+        if (fileCache.has(resolvedPath + '.js')) {
+          resolvedPath += '.js';
+        } else if (fileCache.has(resolvedPath + '/index.js')) {
+          resolvedPath += '/index.js';
+        }
+      }
+    } else {
+      // Build absolute node_modules path from fromDir
+      const nmBase = fromDir.startsWith('/') ? fromDir : vfs.resolvePath(fromDir);
+      const nodeModulesPath = `${nmBase}/node_modules/${modulePath}`;
+      const pkgJsonPath = `${nodeModulesPath}/package.json`;
+
+      if (fileCache.has(pkgJsonPath)) {
+        try {
+          const pkg = JSON.parse(fileCache.get(pkgJsonPath));
+          let mainFile = pkg.main || 'index.js';
+          // Normalize: strip leading ./, ensure .js extension
+          mainFile = mainFile.replace(/^\.\//, '');
+          if (!mainFile.endsWith('.js') && !mainFile.endsWith('.json')) {
+            mainFile += '.js';
+          }
+          resolvedPath = `${nodeModulesPath}/${mainFile}`;
+        } catch {
+          resolvedPath = `${nodeModulesPath}/index.js`;
+        }
+      } else {
+        resolvedPath = `${nodeModulesPath}/index.js`;
+      }
+    }
+
+    // Check cache first
+    if (moduleCache.has(resolvedPath)) {
+      return moduleCache.get(resolvedPath).exports;
+    }
+
+    // Load the file content from cache
+    const content = fileCache.get(resolvedPath);
+    if (!content && content !== '') {
+      throw new Error(`Cannot find module '${modulePath}' (resolved to '${resolvedPath}')`);
+    }
+
+    // Handle JSON files
+    if (resolvedPath.endsWith('.json')) {
+      const jsonExports = JSON.parse(content);
+      moduleCache.set(resolvedPath, { exports: jsonExports });
+      return jsonExports;
+    }
+
+    // Create module object
+    const module = { exports: {} };
+    const exports = module.exports;
+
+    // Add to cache before execution (to handle circular dependencies)
+    moduleCache.set(resolvedPath, module);
+
+    // Get module directory for nested requires
+    const moduleDir = resolvedPath.substring(0, resolvedPath.lastIndexOf('/')) || vfs.cwd;
+
+    // Create nested require function
+    const nestedRequire = (nestedPath) => requireModule(nestedPath, moduleDir);
+
+    // Wrap code in CommonJS wrapper (like Node.js does)
+    try {
+      const wrappedCode = `(function(module, exports, require, __filename, __dirname, console, process, global, setTimeout, setInterval, clearTimeout, clearInterval, JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean, Map, Set, Promise, Symbol, Error, parseInt, parseFloat, isNaN, isFinite, Buffer) {
+${content}
+})`;
+
+      const moduleFunction = eval(wrappedCode);
+      moduleFunction(
+        module, exports, nestedRequire, resolvedPath, moduleDir,
+        console, // Use real console for modules
+        {
+          env: { ...vfs.env },
+          cwd: () => vfs.cwd,
+          exit: (code) => { throw { exitCode: code }; },
+          argv: ['node', resolvedPath],
+          version: 'v20.0.0 (Foam)',
+          platform: 'browser',
+        },
+        globalThis,
+        setTimeout, setInterval, clearTimeout, clearInterval,
+        JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean,
+        Map, Set, Promise, Symbol, Error, parseInt, parseFloat, isNaN, isFinite,
+        {
+          from: (str) => new TextEncoder().encode(str),
+          toString: (buf) => new TextDecoder().decode(buf),
+        }
+      );
+    } catch (err) {
+      // Remove from cache on error
+      moduleCache.delete(resolvedPath);
+      throw err;
+    }
+
+    return module.exports;
+  }
+
+  // Pre-load node_modules into fileCache so synchronous require() works
+  async function preloadNodeModules(dir) {
+    const nmPath = dir + '/node_modules';
+    try {
+      const entries = await vfs.readdir(nmPath);
+      for (const entry of entries) {
+        if (entry.type === 'dir') {
+          await preloadPackage(nmPath + '/' + entry.name);
+        }
+      }
+    } catch { /* no node_modules */ }
+  }
+
+  async function preloadPackage(pkgDir) {
+    // Load package.json first
+    try {
+      await cacheFile(pkgDir + '/package.json');
+    } catch { /* ok */ }
+    // Load all .js and .json files recursively
+    try {
+      const entries = await vfs.readdir(pkgDir);
+      for (const entry of entries) {
+        const fullPath = pkgDir + '/' + entry.name;
+        if (entry.type === 'dir' && entry.name !== 'node_modules') {
+          await preloadPackage(fullPath);
+        } else if (entry.name.endsWith('.js') || entry.name.endsWith('.json')) {
+          await cacheFile(fullPath);
+        }
+      }
+    } catch { /* ok */ }
   }
 
   if (args.length === 0 || args[0] === '-e') {
     const code = args[0] === '-e' ? args.slice(1).join(' ') : (stdin || '');
     if (!code) { stderr('Usage: node -e "code" or node <file>\n'); return 1; }
+    // Pre-load project files and node_modules so require() works synchronously
+    await preloadPackage(vfs.cwd);
+    await preloadNodeModules(vfs.cwd);
     try {
       const logs = [];
       const sandbox = {
@@ -737,19 +912,7 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
           warn: (...a) => logs.push(a.map(String).join(' ')),
           info: (...a) => logs.push(a.map(String).join(' ')),
         },
-        require: (mod) => {
-          // Synchronous require is limited in browser, but we can handle JSON
-          try {
-            // For node_modules, try to load package.json
-            const pkgPath = `node_modules/${mod}/package.json`;
-            const pkgJson = vfs.readFileSync?.(pkgPath) || null;
-            if (pkgJson) {
-              stderr(`Note: require('${mod}') loaded package.json. Use dynamic import() for full module support.\n`);
-              return JSON.parse(pkgJson);
-            }
-          } catch {}
-          throw new Error(`Cannot require '${mod}' in browser context. Use: const mod = await import('https://esm.sh/${mod}')`);
-        },
+        require: (mod) => requireModule(mod, vfs.cwd),
         process: {
           env: { ...vfs.env },
           cwd: () => vfs.cwd,
@@ -1161,6 +1324,516 @@ json.dumps(packages[:20])  # Limit to first 20
 
   } catch (err) {
     stderr(`pip: ${err.message}\n`);
+    return 1;
+  }
+};
+
+// ─── SPIRIT (Claude Code agent) ─────────────────────────────────────────────
+
+commands.spirit = async (args, { stdout, stderr, vfs, terminal }) => {
+  const apiKey = vfs.env.ANTHROPIC_API_KEY || localStorage.getItem('foam_api_key') || '';
+
+  if (!apiKey) {
+    stdout('Spirit - AI Coding Agent for Foam OS\n\n');
+    stdout('Spirit is not configured. To set up:\n\n');
+    stdout('  export ANTHROPIC_API_KEY=sk-ant-your-key-here\n');
+    stdout('  spirit "your prompt here"\n\n');
+    stdout('Or configure via: foam config set api_key <key>\n\n');
+    stdout('Spirit uses Claude to read, write, and edit files\n');
+    stdout('in your Foam filesystem with access to all shell commands.\n\n');
+    stdout('Slash commands: /help, /clear, /model, /stats, /thinking, /cost\n');
+    return 1;
+  }
+
+  const prompt = args.join(' ');
+  if (!prompt) {
+    stderr('spirit: please provide a prompt\n');
+    stderr('Usage: spirit "create a hello world file"\n');
+    return 1;
+  }
+
+  // Get SpiritAgent and FoamProvider from the global foam context
+  const foam = globalThis.__foam;
+  if (!foam) {
+    stderr('spirit: Foam runtime not initialized\n');
+    return 1;
+  }
+
+  try {
+    // Dynamically import Spirit (lazy load)
+    const spiritMod = await import('../spirit/dist/spirit.js');
+    const { SpiritAgent, FoamProvider } = spiritMod;
+
+    // Create provider from current VFS/shell/terminal
+    const provider = foam.provider || new FoamProvider(vfs, foam.shell || terminal?.shell, terminal);
+
+    const model = vfs.env.SPIRIT_MODEL || 'claude-sonnet-4-20250514';
+    const maxTurns = parseInt(vfs.env.SPIRIT_MAX_TURNS || '30', 10);
+    const maxTokens = parseInt(vfs.env.SPIRIT_MAX_TOKENS || '8192', 10);
+    const thinkingBudget = vfs.env.SPIRIT_THINKING
+      ? parseInt(vfs.env.SPIRIT_THINKING, 10)
+      : undefined;
+
+    const agent = new SpiritAgent(provider, {
+      apiKey,
+      model,
+      maxTurns,
+      maxTokens,
+      thinkingBudget,
+      onText: (text) => {
+        provider.writeToTerminal(text);
+      },
+      onThinking: (thinking) => {
+        provider.writeToTerminal(`\x1b[2m${thinking}\x1b[0m`);
+      },
+      onToolStart: (name, input) => {
+        let summary = name;
+        if (name === 'Bash' && input.command) summary = `$ ${input.command}`;
+        else if (name === 'Read' && input.file_path) summary = `Reading ${input.file_path}`;
+        else if (name === 'Write' && input.file_path) summary = `Writing ${input.file_path}`;
+        else if (name === 'Edit' && input.file_path) summary = `Editing ${input.file_path}`;
+        else if (name === 'Glob' && input.pattern) summary = `Glob ${input.pattern}`;
+        else if (name === 'Grep' && input.pattern) summary = `Grep ${input.pattern}`;
+        provider.writeToTerminal(`\x1b[36m⟫ ${summary}\x1b[0m\n`);
+      },
+      onToolEnd: () => {},
+      onError: (error) => {
+        provider.writeToTerminal(`\x1b[31mError: ${error.message}\x1b[0m\n`);
+      },
+    });
+
+    // Handle slash commands
+    if (prompt.startsWith('/')) {
+      const { handled, output } = await agent.handleSlashCommand(prompt);
+      if (handled) {
+        stdout(output + '\n');
+        return 0;
+      }
+    }
+
+    const result = await agent.run(prompt);
+    if (result) stdout(result);
+    return 0;
+  } catch (err) {
+    stderr(`spirit: ${err.message}\n`);
+    return 1;
+  }
+};
+
+// ─── BUILD (esbuild-wasm) ───────────────────────────────────────────────────
+
+let esbuildInitialized = false;
+let esbuildInitPromise = null;
+let esbuildModule = null;
+
+async function ensureEsbuild() {
+  if (esbuildInitialized) return esbuildModule;
+  if (esbuildInitPromise) { await esbuildInitPromise; return esbuildModule; }
+
+  esbuildInitPromise = (async () => {
+    try {
+      esbuildModule = await import('https://esm.sh/esbuild-wasm@0.27.2');
+      await esbuildModule.initialize({
+        wasmURL: 'https://unpkg.com/esbuild-wasm@0.27.2/esbuild.wasm',
+        worker: false,
+      });
+      esbuildInitialized = true;
+    } catch (e) {
+      esbuildInitPromise = null;
+      throw new Error(`Failed to initialize esbuild: ${e.message}`);
+    }
+  })();
+
+  await esbuildInitPromise;
+  return esbuildModule;
+}
+
+function createFoamFSPlugin(vfs) {
+  return {
+    name: 'foam-virtual-fs',
+    setup(build) {
+      // Resolve imports
+      build.onResolve({ filter: /.*/ }, async (args) => {
+        // Bare specifiers -> node_modules
+        if (!args.path.startsWith('.') && !args.path.startsWith('/')) {
+          const candidates = [
+            `node_modules/${args.path}/package.json`,
+            `node_modules/${args.path}/index.js`,
+            `node_modules/${args.path}/index.ts`,
+            `node_modules/${args.path}.js`,
+            `node_modules/${args.path}.ts`,
+          ];
+          // Also check from cwd
+          const cwdCandidates = candidates.map(c => vfs.resolvePath(c));
+
+          for (const p of [...cwdCandidates, ...candidates]) {
+            try {
+              if (p.endsWith('package.json')) {
+                const pkgContent = await vfs.readFile(p);
+                const pkg = JSON.parse(pkgContent);
+                const main = pkg.main || 'index.js';
+                const pkgDir = p.replace('/package.json', '');
+                return { path: vfs.resolvePath(main, pkgDir), namespace: 'foam-fs' };
+              } else {
+                await vfs.readFile(p);
+                return { path: p, namespace: 'foam-fs' };
+              }
+            } catch { continue; }
+          }
+          // Not found -> external
+          return { path: args.path, external: true };
+        }
+
+        // Relative/absolute paths
+        const baseDir = args.importer
+          ? args.importer.substring(0, args.importer.lastIndexOf('/')) || '/'
+          : vfs.cwd;
+        const resolved = args.path.startsWith('/')
+          ? args.path
+          : vfs.resolvePath(args.path, baseDir);
+
+        // Try with various extensions
+        for (const ext of ['', '.ts', '.tsx', '.js', '.jsx', '.json']) {
+          try {
+            await vfs.readFile(resolved + ext);
+            return { path: resolved + ext, namespace: 'foam-fs' };
+          } catch { continue; }
+        }
+
+        return { path: resolved, namespace: 'foam-fs' };
+      });
+
+      // Load from VFS
+      build.onLoad({ filter: /.*/, namespace: 'foam-fs' }, async (args) => {
+        try {
+          const contents = await vfs.readFile(args.path);
+          let loader = 'js';
+          if (args.path.endsWith('.ts')) loader = 'ts';
+          else if (args.path.endsWith('.tsx')) loader = 'tsx';
+          else if (args.path.endsWith('.jsx')) loader = 'jsx';
+          else if (args.path.endsWith('.json')) loader = 'json';
+          else if (args.path.endsWith('.css')) loader = 'css';
+          return { contents, loader };
+        } catch (e) {
+          return { errors: [{ text: `Failed to load ${args.path}: ${e.message}`, location: null }] };
+        }
+      });
+    },
+  };
+}
+
+commands.build = async (args, { stdout, stderr, vfs }) => {
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+    stdout('Usage: build <entry-point> [options]\n\n');
+    stdout('Options:\n');
+    stdout('  --outfile=FILE    Output file path (default: out.js)\n');
+    stdout('  --bundle          Bundle all dependencies\n');
+    stdout('  --minify          Minify the output\n');
+    stdout('  --sourcemap       Generate source maps\n');
+    stdout('  --format=FORMAT   Output format (iife, cjs, esm)\n');
+    stdout('  --target=TARGET   Target environment (es2015, es2020, etc.)\n');
+    stdout('\nExample:\n');
+    stdout('  build src/index.ts --outfile=dist/bundle.js --bundle --minify\n');
+    return 0;
+  }
+
+  try {
+    stdout('Initializing esbuild-wasm...\n');
+    const esbuild = await ensureEsbuild();
+
+    // Parse arguments
+    const entryPoint = args[0];
+    let outfile = 'out.js';
+    let bundle = false;
+    let minify = false;
+    let sourcemap = false;
+    let format = 'esm';
+    let target = 'es2020';
+
+    for (let i = 1; i < args.length; i++) {
+      const arg = args[i];
+      if (arg.startsWith('--outfile=')) outfile = arg.slice('--outfile='.length);
+      else if (arg === '--bundle') bundle = true;
+      else if (arg === '--minify') minify = true;
+      else if (arg === '--sourcemap') sourcemap = true;
+      else if (arg.startsWith('--format=')) format = arg.slice('--format='.length);
+      else if (arg.startsWith('--target=')) target = arg.slice('--target='.length);
+    }
+
+    const entryPath = vfs.resolvePath(entryPoint);
+    stdout(`Building ${entryPath}...\n`);
+
+    const result = await esbuild.build({
+      entryPoints: [entryPath],
+      bundle,
+      minify,
+      sourcemap,
+      format,
+      target,
+      write: false,
+      plugins: [createFoamFSPlugin(vfs)],
+      logLevel: 'silent',
+    });
+
+    if (result.errors.length > 0) {
+      for (const error of result.errors) {
+        stderr(`Error: ${error.text}\n`);
+        if (error.location) {
+          stderr(`  at ${error.location.file}:${error.location.line}:${error.location.column}\n`);
+        }
+      }
+      return 1;
+    }
+
+    for (const warning of result.warnings) {
+      stdout(`Warning: ${warning.text}\n`);
+    }
+
+    if (result.outputFiles && result.outputFiles.length > 0) {
+      const output = result.outputFiles[0];
+      const outputPath = vfs.resolvePath(outfile);
+
+      // Ensure output directory exists
+      const outputDir = outputPath.substring(0, outputPath.lastIndexOf('/'));
+      if (outputDir) {
+        try { await vfs.mkdir(outputDir, { recursive: true }); } catch {}
+      }
+
+      // esbuild-wasm returns Uint8Array contents, decode to string for VFS
+      const content = typeof output.contents === 'string'
+        ? output.contents
+        : new TextDecoder().decode(output.contents);
+      await vfs.writeFile(outputPath, content);
+
+      const sizeKB = (content.length / 1024).toFixed(2);
+      stdout(`✓ Built: ${outputPath} (${sizeKB} KB)\n`);
+
+      // Write sourcemap if generated
+      if (sourcemap && result.outputFiles.length > 1) {
+        const mapOutput = result.outputFiles[1];
+        const mapContent = typeof mapOutput.contents === 'string'
+          ? mapOutput.contents
+          : new TextDecoder().decode(mapOutput.contents);
+        const mapPath = outputPath + '.map';
+        await vfs.writeFile(mapPath, mapContent);
+        stdout(`✓ Sourcemap: ${mapPath}\n`);
+      }
+    }
+
+    return 0;
+  } catch (err) {
+    stderr(`build: ${err.message}\n`);
+    return 1;
+  }
+};
+
+// Alias: tsc -> build (for TypeScript compilation)
+commands.tsc = async (args, ctx) => {
+  // Map tsc-style args to build args
+  const buildArgs = [];
+  let entryFile = null;
+  let outFile = null;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--outFile' || args[i] === '--outfile') {
+      outFile = args[++i];
+    } else if (!args[i].startsWith('-')) {
+      entryFile = args[i];
+    }
+  }
+
+  if (!entryFile) {
+    ctx.stderr('Usage: tsc <file.ts> [--outFile output.js]\n');
+    return 1;
+  }
+
+  buildArgs.push(entryFile);
+  if (outFile) buildArgs.push(`--outfile=${outFile}`);
+  else buildArgs.push(`--outfile=${entryFile.replace(/\.tsx?$/, '.js')}`);
+
+  return commands.build(buildArgs, ctx);
+};
+
+// ─── BUNDLE ─────────────────────────────────────────────────────────────────
+
+commands.bundle = async (args, { stdin, stdout, stderr, vfs }) => {
+  if (args.length === 0) {
+    stderr('Usage: bundle <entry.js> [output.js]\n');
+    stderr('       bundle --help\n');
+    stderr('\n');
+    stderr('Simple bundler that resolves require() calls and concatenates modules.\n');
+    return 1;
+  }
+
+  if (args[0] === '--help') {
+    stdout('Foam Simple Bundler\n');
+    stdout('\n');
+    stdout('Usage: bundle <entry.js> [output.js]\n');
+    stdout('\n');
+    stdout('Bundles a JavaScript file and its dependencies into a single file.\n');
+    stdout('Resolves require() calls recursively and concatenates all modules.\n');
+    stdout('\n');
+    stdout('Options:\n');
+    stdout('  --help    Show this help message\n');
+    stdout('\n');
+    stdout('Example:\n');
+    stdout('  bundle app.js bundle.js\n');
+    stdout('  node bundle.js\n');
+    return 0;
+  }
+
+  const entryFile = args[0];
+  const outputFile = args[1] || 'bundle.js';
+
+  try {
+    // Track bundled modules to avoid duplicates
+    const bundled = new Set();
+    const moduleContents = [];
+
+    // Recursive function to resolve and bundle a module
+    async function bundleModule(modulePath, fromDir = vfs.cwd) {
+      // Resolve the module path
+      let resolvedPath = modulePath;
+
+      if (modulePath.startsWith('./') || modulePath.startsWith('../') || modulePath.startsWith('/')) {
+        resolvedPath = vfs.resolvePath(modulePath, fromDir);
+      } else {
+        const nodeModulesPath = `node_modules/${modulePath}`;
+        try {
+          const pkgJsonPath = `${nodeModulesPath}/package.json`;
+          const pkgJson = JSON.parse(await vfs.readFile(pkgJsonPath));
+          const mainFile = pkgJson.main || 'index.js';
+          resolvedPath = `${nodeModulesPath}/${mainFile}`;
+        } catch {
+          resolvedPath = `${nodeModulesPath}/index.js`;
+        }
+      }
+
+      // Add .js extension if missing
+      if (!resolvedPath.endsWith('.js') && !resolvedPath.endsWith('.json')) {
+        try {
+          await vfs.readFile(resolvedPath + '.js');
+          resolvedPath += '.js';
+        } catch {
+          try {
+            await vfs.readFile(resolvedPath + '/index.js');
+            resolvedPath += '/index.js';
+          } catch {
+            // Use as-is
+          }
+        }
+      }
+
+      // Skip if already bundled
+      if (bundled.has(resolvedPath)) {
+        return;
+      }
+      bundled.add(resolvedPath);
+
+      // Read file content
+      let content;
+      try {
+        content = await vfs.readFile(resolvedPath);
+      } catch (err) {
+        throw new Error(`Cannot read module '${modulePath}' (${resolvedPath}): ${err.message}`);
+      }
+
+      // Handle JSON files
+      if (resolvedPath.endsWith('.json')) {
+        moduleContents.push(`// Module: ${resolvedPath}`);
+        moduleContents.push(`__modules['${resolvedPath}'] = ${content};`);
+        return;
+      }
+
+      // Parse require() calls to find dependencies
+      const requirePattern = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+      const dependencies = [];
+      let match;
+      while ((match = requirePattern.exec(content)) !== null) {
+        dependencies.push(match[1]);
+      }
+
+      // Get module directory for nested requires
+      const moduleDir = resolvedPath.substring(0, resolvedPath.lastIndexOf('/')) || vfs.cwd;
+
+      // Recursively bundle dependencies first
+      for (const dep of dependencies) {
+        try {
+          await bundleModule(dep, moduleDir);
+        } catch (err) {
+          stderr(`Warning: Could not bundle dependency '${dep}' from '${resolvedPath}': ${err.message}\n`);
+        }
+      }
+
+      // Add this module to the bundle
+      moduleContents.push(`\n// Module: ${resolvedPath}`);
+      moduleContents.push(`__modules['${resolvedPath}'] = function(module, exports, require, __filename, __dirname) {`);
+      moduleContents.push(content);
+      moduleContents.push(`};\n`);
+    }
+
+    // Start bundling from entry point
+    stdout(`Bundling ${entryFile}...\n`);
+    await bundleModule(entryFile);
+
+    // Create the bundle header with module loader
+    const bundleHeader = `// Foam Bundle
+// Entry: ${entryFile}
+// Generated: ${new Date().toISOString()}
+
+(function() {
+  // Module cache
+  const __cache = {};
+  const __modules = {};
+
+  // require() implementation
+  function require(modulePath) {
+    if (__cache[modulePath]) {
+      return __cache[modulePath].exports;
+    }
+
+    const module = { exports: {} };
+    const exports = module.exports;
+    __cache[modulePath] = module;
+
+    const moduleFunc = __modules[modulePath];
+    if (!moduleFunc) {
+      throw new Error('Cannot find module: ' + modulePath);
+    }
+
+    if (typeof moduleFunc === 'function') {
+      const moduleDir = modulePath.substring(0, modulePath.lastIndexOf('/')) || '.';
+      moduleFunc(module, exports, require, modulePath, moduleDir);
+    } else {
+      // JSON module
+      module.exports = moduleFunc;
+    }
+
+    return module.exports;
+  }
+
+  // Module definitions
+`;
+
+    const bundleFooter = `
+  // Execute entry point
+  require('${vfs.resolvePath(entryFile, vfs.cwd)}');
+})();
+`;
+
+    // Combine everything
+    const bundle = bundleHeader + moduleContents.join('\n') + bundleFooter;
+
+    // Write the bundle
+    await vfs.writeFile(outputFile, bundle);
+
+    stdout(`✓ Bundled ${bundled.size} module(s) to ${outputFile}\n`);
+    stdout(`  Entry: ${entryFile}\n`);
+    stdout(`  Output: ${outputFile} (${bundle.length} bytes)\n`);
+
+    return 0;
+  } catch (err) {
+    stderr(`bundle: ${err.message}\n`);
     return 1;
   }
 };
