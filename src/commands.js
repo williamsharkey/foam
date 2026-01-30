@@ -494,8 +494,47 @@ commands.ed = async (args, { stdout, stderr, vfs }) => {
       modified = false;
       if (cmd === 'wq') break;
     } else if (cmd === 'p') {
+      // Print all lines (plain)
       for (let j = 0; j < lines.length; j++) {
-        stdout(`${j + 1}: ${lines[j]}\n`);
+        stdout(`${lines[j]}\n`);
+      }
+    } else if (cmd === 'n') {
+      // Print with line numbers
+      for (let j = 0; j < lines.length; j++) {
+        stdout(`${String(j + 1).padStart(4, ' ')}: ${lines[j]}\n`);
+      }
+    } else if (/^\/.*\/$/.test(cmd)) {
+      // Search: /pattern/
+      const pattern = cmd.slice(1, -1);
+      const regex = new RegExp(pattern, 'i');
+      let found = false;
+      for (let j = 0; j < lines.length; j++) {
+        if (regex.test(lines[j])) {
+          stdout(`${j + 1}: ${lines[j]}\n`);
+          found = true;
+        }
+      }
+      if (!found) {
+        stdout('No matches found\n');
+      }
+    } else if (/^\d+p$/.test(cmd)) {
+      // Print specific line
+      const lineNum = parseInt(cmd);
+      if (lineNum > 0 && lineNum <= lines.length) {
+        stdout(`${lines[lineNum - 1]}\n`);
+      }
+    } else if (/^\d+s\/.+\/.+\/$/.test(cmd)) {
+      // Substitute: 1s/old/new/
+      const match = cmd.match(/^(\d+)s\/(.+)\/(.+)\/$/);
+      if (match) {
+        const lineNum = parseInt(match[1]);
+        const pattern = match[2];
+        const replacement = match[3];
+        if (lineNum > 0 && lineNum <= lines.length) {
+          lines[lineNum - 1] = lines[lineNum - 1].replace(new RegExp(pattern, 'g'), replacement);
+          modified = true;
+          stdout(`${lineNum}: ${lines[lineNum - 1]}\n`);
+        }
       }
     } else if (/^\d+a$/.test(cmd)) {
       const lineNum = parseInt(cmd);
@@ -509,13 +548,17 @@ commands.ed = async (args, { stdout, stderr, vfs }) => {
       modified = true;
     } else if (/^\d+d$/.test(cmd)) {
       const lineNum = parseInt(cmd);
-      lines.splice(lineNum - 1, 1);
-      modified = true;
+      if (lineNum > 0 && lineNum <= lines.length) {
+        lines.splice(lineNum - 1, 1);
+        modified = true;
+      }
     } else if (/^\d+c$/.test(cmd)) {
       const lineNum = parseInt(cmd);
       const text = cmdArgs[++i] || '';
-      lines[lineNum - 1] = text;
-      modified = true;
+      if (lineNum > 0 && lineNum <= lines.length) {
+        lines[lineNum - 1] = text;
+        modified = true;
+      }
     }
   }
 
