@@ -4,13 +4,16 @@
   "description": "Browser-native cloud OS — virtual Linux terminal powered by Claude",
   "type": "module",
   "scripts": {
-    "test": "node test/run-tests-skyeyes.js",
-    "test:puppeteer": "node test/run-tests.js",
+    "test": "node test/run-tests-linkedom.js",
+    "test:linkedom": "node test/run-tests-linkedom.js",
+    "test:skyeyes": "node test/run-tests-skyeyes.js",
     "test:check": "node test/skyeyes-helper.js check",
     "test:info": "node test/skyeyes-helper.js info"
   },
   "devDependencies": {
-    "puppeteer": "^24.0.0"
+    "fake-indexeddb": "^6.0.0",
+    "isomorphic-git": "^1.27.1",
+    "linkedom": "^0.18.0"
   },
   "repository": {
     "type": "git",
