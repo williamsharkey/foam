@@ -224,31 +224,81 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
         }
         stdout(`Cloning into '${repoName}'...\n`);
 
-        // Configurable CORS proxy with timeout
-        const corsProxy = vfs.env.GIT_CORS_PROXY || 'https://cors.isomorphic-git.org';
-        const cloneWithTimeout = (proxy) => {
-          return Promise.race([
-            git.clone({
-              fs, http, dir: targetDir, url: cloneUrl,
-              corsProxy: proxy,
-              singleBranch: true,
-              depth: 1,
-            }),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('clone timed out')), 30000)
-            ),
-          ]);
-        };
-
-        try {
-          await cloneWithTimeout(corsProxy);
-        } catch (firstErr) {
-          if (corsProxy !== 'https://cors.isomorphic-git.org') {
-            stdout(`Proxy failed (${firstErr.message}), retrying with fallback...\n`);
-            await cloneWithTimeout('https://cors.isomorphic-git.org');
-          } else {
-            throw firstErr;
+        // For GitHub repos, use tarball API (CORS-friendly) as primary strategy
+        const ghMatch = cloneUrl.match(/github\.com\/([^/]+)\/([^/.]+)/);
+        let cloned = false;
+        if (ghMatch) {
+          const [, ghOwner, ghRepo] = ghMatch;
+          try {
+            stdout('Downloading via GitHub API...\n');
+            const tarResp = await fetch(`https://api.github.com/repos/${ghOwner}/${ghRepo}/tarball`, {
+              headers: { 'Accept': 'application/vnd.github+json' },
+              redirect: 'follow',
+            });
+            if (!tarResp.ok) throw new Error(`GitHub API: ${tarResp.status}`);
+            const tarBuf = await tarResp.arrayBuffer();
+            const ds = new DecompressionStream('gzip');
+            const dsWriter = ds.writable.getWriter();
+            dsWriter.write(new Uint8Array(tarBuf));
+            dsWriter.close();
+            const decompressed = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+            // Extract tar entries
+            let tOff = 0;
+            while (tOff + 512 <= decompressed.length) {
+              const hdr = decompressed.slice(tOff, tOff + 512);
+              if (hdr.every(b => b === 0)) break;
+              let tName = '';
+              for (let i = 0; i < 100 && hdr[i] !== 0; i++) tName += String.fromCharCode(hdr[i]);
+              let tPrefix = '';
+              for (let i = 345; i < 500 && hdr[i] !== 0; i++) tPrefix += String.fromCharCode(hdr[i]);
+              if (tPrefix) tName = tPrefix + '/' + tName;
+              let tSizeStr = '';
+              for (let i = 124; i < 136 && hdr[i] !== 0; i++) tSizeStr += String.fromCharCode(hdr[i]);
+              const tSize = parseInt(tSizeStr.trim(), 8) || 0;
+              const tType = String.fromCharCode(hdr[156]);
+              tOff += 512;
+              const tParts = tName.split('/');
+              const tRel = tParts.slice(1).join('/');
+              if (tRel && (tType === '0' || (tType === '\0' && tSize > 0))) {
+                const fPath = vfs.resolvePath(tRel, targetDir);
+                const fDir = fPath.substring(0, fPath.lastIndexOf('/'));
+                if (fDir) await vfs.mkdir(fDir, { recursive: true });
+                await vfs.writeFile(fPath, new TextDecoder().decode(decompressed.slice(tOff, tOff + tSize)));
+              } else if (tRel && tType === '5') {
+                await vfs.mkdir(vfs.resolvePath(tRel, targetDir), { recursive: true });
+              }
+              tOff += Math.ceil(tSize / 512) * 512;
+            }
+            await git.init({ fs, dir: targetDir, defaultBranch: 'main' });
+            const clFiles = await listAllFiles(vfs, targetDir, targetDir);
+            for (const cf of clFiles) await git.add({ fs, dir: targetDir, filepath: cf });
+            await git.commit({
+              fs, dir: targetDir,
+              message: `Clone of ${ghOwner}/${ghRepo}`,
+              author: { name: vfs.env.USER || 'user', email: 'user@foam.local' },
+            });
+            cloned = true;
+          } catch (ghErr) {
+            stdout(`GitHub API failed (${ghErr.message}), trying git protocol...\n`);
           }
+        }
+
+        if (!cloned) {
+          const corsProxy = vfs.env.GIT_CORS_PROXY || 'https://cors.isomorphic-git.org';
+          const cloneWithTimeout = (proxy) => {
+            return Promise.race([
+              git.clone({
+                fs, http, dir: targetDir, url: cloneUrl,
+                corsProxy: proxy,
+                singleBranch: true,
+                depth: 1,
+              }),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('clone timed out')), 30000)
+              ),
+            ]);
+          };
+          await cloneWithTimeout(corsProxy);
         }
 
         stdout('done.\n');
@@ -476,6 +526,11 @@ commands.npm = async (args, { stdout, stderr, vfs, exec }) => {
       stderr(`npm ERR! ${err.message}\n`);
       return 1;
     }
+  }
+
+  // npm lifecycle aliases: test, start, stop, restart → npm run <name>
+  if (sub === 'test' || sub === 't' || sub === 'start' || sub === 'stop' || sub === 'restart') {
+    return commands.npm(['run', sub, ...args.slice(1)], { stdout, stderr, vfs, exec });
   }
 
   stderr(`npm ERR! Unknown command: "${sub}"\n`);
@@ -962,14 +1017,23 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
       case 'events':
       case 'node:events': {
         class EventEmitter {
-          constructor() { this._events = {}; }
+          constructor() { this._events = {}; this._maxListeners = 10; }
           on(e, fn) { (this._events[e] ??= []).push(fn); return this; }
           off(e, fn) { this._events[e] = (this._events[e] || []).filter(f => f !== fn); return this; }
-          emit(e, ...args) { (this._events[e] || []).forEach(fn => fn(...args)); return true; }
+          emit(e, ...args) { (this._events[e] || []).forEach(fn => fn(...args)); return !!(this._events[e] && this._events[e].length); }
           once(e, fn) { const w = (...a) => { this.off(e, w); fn(...a); }; return this.on(e, w); }
+          addListener(e, fn) { return this.on(e, fn); }
+          removeListener(e, fn) { return this.off(e, fn); }
           removeAllListeners(e) { if (e) delete this._events[e]; else this._events = {}; return this; }
+          listeners(e) { return [...(this._events[e] || [])]; }
+          listenerCount(e) { return (this._events[e] || []).length; }
+          eventNames() { return Object.keys(this._events); }
+          setMaxListeners(n) { this._maxListeners = n; return this; }
+          getMaxListeners() { return this._maxListeners; }
+          prependListener(e, fn) { (this._events[e] ??= []).unshift(fn); return this; }
         }
-        return { EventEmitter, default: EventEmitter };
+        EventEmitter.EventEmitter = EventEmitter;
+        return EventEmitter;
       }
       case 'url':
       case 'node:url': return { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, parse: (s) => new URL(s), format: (o) => String(o) };
@@ -980,10 +1044,128 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
         assert.equal = (a, b, msg) => { if (a != b) throw new Error(msg || `AssertionError: ${a} != ${b}`); };
         assert.strictEqual = (a, b, msg) => { if (a !== b) throw new Error(msg || `AssertionError: ${a} !== ${b}`); };
         assert.deepEqual = assert.deepStrictEqual = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(msg || 'AssertionError: deep equal failed'); };
-        assert.throws = (fn, msg) => { try { fn(); throw new Error(msg || 'Expected to throw'); } catch(e) { if (e.message === (msg || 'Expected to throw')) throw e; } };
+        assert.notStrictEqual = (a, b, msg) => { if (a === b) throw new Error(msg || `AssertionError: ${a} === ${b}`); };
         assert.notEqual = (a, b, msg) => { if (a == b) throw new Error(msg || `AssertionError: ${a} == ${b}`); };
+        assert.throws = (fn, expected, msg) => {
+          if (typeof expected === 'string') { msg = expected; expected = undefined; }
+          let threw = false;
+          try { fn(); } catch (e) {
+            threw = true;
+            if (expected instanceof RegExp && !expected.test(e.message)) throw new Error(msg || `Expected error matching ${expected}`);
+            if (typeof expected === 'function' && !(e instanceof expected)) throw new Error(msg || 'Wrong error type');
+          }
+          if (!threw) throw new Error(msg || 'Expected function to throw');
+        };
+        assert.doesNotThrow = (fn, msg) => { try { fn(); } catch (e) { throw new Error(msg || `Got unexpected error: ${e.message}`); } };
+        assert.fail = (msg) => { throw new Error(typeof msg === 'string' ? msg : 'AssertionError: assert.fail()'); };
+        assert.ifError = (val) => { if (val) throw val; };
+        assert.match = (str, re, msg) => { if (!re.test(str)) throw new Error(msg || `AssertionError: ${str} does not match ${re}`); };
+        assert.rejects = async (fn, expected, msg) => { try { await (typeof fn === 'function' ? fn() : fn); throw new Error(msg || 'Expected rejection'); } catch (e) { if (e.message === (msg || 'Expected rejection')) throw e; } };
         return assert;
       }
+      case 'stream':
+      case 'node:stream': {
+        class Stream { pipe(dest) { return dest; } on() { return this; } once() { return this; } emit() { return this; } }
+        class Readable extends Stream { read() { return null; } push() {} setEncoding() { return this; } resume() { return this; } pause() { return this; } }
+        class Writable extends Stream { write() { return true; } end() {} cork() {} uncork() {} }
+        class Transform extends Stream { write() { return true; } end() {} push() {} _transform() {} }
+        class Duplex extends Stream { write() { return true; } end() {} read() { return null; } push() {} }
+        class PassThrough extends Transform {}
+        Stream.Readable = Readable; Stream.Writable = Writable; Stream.Transform = Transform;
+        Stream.Duplex = Duplex; Stream.PassThrough = PassThrough; Stream.Stream = Stream;
+        return Stream;
+      }
+      case 'buffer':
+      case 'node:buffer': {
+        const B = {
+          from: (data, encoding) => {
+            if (typeof data === 'string') return new TextEncoder().encode(data);
+            if (data instanceof Uint8Array) return data;
+            return new Uint8Array(data || []);
+          },
+          alloc: (size, fill) => { const b = new Uint8Array(size); if (fill) b.fill(typeof fill === 'number' ? fill : 0); return b; },
+          allocUnsafe: (size) => new Uint8Array(size),
+          isBuffer: (obj) => obj instanceof Uint8Array,
+          concat: (list, totalLength) => {
+            const total = totalLength || list.reduce((s, b) => s + b.length, 0);
+            const result = new Uint8Array(total);
+            let offset = 0;
+            for (const b of list) { result.set(b, offset); offset += b.length; }
+            return result;
+          },
+          byteLength: (str) => new TextEncoder().encode(str).length,
+        };
+        return { Buffer: B };
+      }
+      case 'crypto':
+      case 'node:crypto': return {
+        randomBytes: (size) => globalThis.crypto.getRandomValues(new Uint8Array(size)),
+        randomUUID: () => globalThis.crypto.randomUUID(),
+        createHash: (alg) => {
+          let data = '';
+          const h = {
+            update: (d) => { data += (typeof d === 'string' ? d : String(d)); return h; },
+            digest: (enc) => {
+              let hash = 0;
+              for (let i = 0; i < data.length; i++) { hash = ((hash << 5) - hash + data.charCodeAt(i)) | 0; }
+              return (hash >>> 0).toString(16).padStart(8, '0');
+            },
+          };
+          return h;
+        },
+        createHmac: (alg, key) => {
+          let data = '';
+          const h = {
+            update: (d) => { data += d; return h; },
+            digest: (enc) => { let hash = 0; for (let i = 0; i < (key + data).length; i++) { hash = ((hash << 5) - hash + (key + data).charCodeAt(i)) | 0; } return (hash >>> 0).toString(16).padStart(8, '0'); },
+          };
+          return h;
+        },
+      };
+      case 'querystring':
+      case 'node:querystring': return {
+        parse: (str) => Object.fromEntries(new URLSearchParams(str)),
+        stringify: (obj) => new URLSearchParams(obj).toString(),
+        escape: (str) => encodeURIComponent(str),
+        unescape: (str) => decodeURIComponent(str),
+      };
+      case 'string_decoder':
+      case 'node:string_decoder': {
+        class StringDecoder {
+          constructor(encoding) { this.encoding = encoding || 'utf8'; this.decoder = new TextDecoder(this.encoding); }
+          write(buf) { return this.decoder.decode(buf, { stream: true }); }
+          end(buf) { return buf ? this.decoder.decode(buf) : ''; }
+        }
+        return { StringDecoder };
+      }
+      case 'http':
+      case 'node:http':
+      case 'https':
+      case 'node:https':
+        return {
+          request: () => { throw new Error(`${name}: use fetch() instead in Foam`); },
+          get: () => { throw new Error(`${name}: use fetch() instead in Foam`); },
+          createServer: () => { throw new Error(`${name}: servers not supported in Foam`); },
+          Agent: class {},
+          STATUS_CODES: { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved', 302: 'Found', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 500: 'Internal Server Error' },
+        };
+      case 'zlib':
+      case 'node:zlib':
+        return {
+          gzipSync: (data) => data,
+          gunzipSync: (data) => data,
+          deflateSync: (data) => data,
+          inflateSync: (data) => data,
+          createGzip: () => ({ on: () => ({}), pipe: (d) => d }),
+          createGunzip: () => ({ on: () => ({}), pipe: (d) => d }),
+        };
+      case 'tty':
+      case 'node:tty':
+        return {
+          isatty: () => true,
+          ReadStream: class { constructor() { this.isTTY = true; this.columns = 80; this.rows = 24; } on() { return this; } },
+          WriteStream: class { constructor() { this.isTTY = true; this.columns = 80; this.rows = 24; } on() { return this; } write() {} },
+        };
       default: return null;
     }
   }
