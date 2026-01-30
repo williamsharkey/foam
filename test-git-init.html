@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Foam Git Init Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    #log { white-space: pre-wrap; background: #252525; padding: 10px; border-radius: 4px; }
+    .success { color: #4ec9b0; }
+    .error { color: #f48771; }
+    .info { color: #569cd6; }
+  </style>
+</head>
+<body>
+  <h1>Foam Git Init Test</h1>
+  <div id="log"></div>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import commands from './src/commands.js';
+    import './src/devtools.js'; // Registers git command
+
+    const log = document.getElementById('log');
+
+    function logMsg(msg, className = 'info') {
+      const line = document.createElement('div');
+      line.className = className;
+      line.textContent = msg;
+      log.appendChild(line);
+    }
+
+    async function runTest() {
+      logMsg('=== Testing Git Init with VFS Fix ===\n', 'info');
+
+      try {
+        // Initialize VFS
+        logMsg('1. Initializing VFS...');
+        const vfs = new VFS();
+        await vfs.init();
+        logMsg('   ✓ VFS initialized', 'success');
+
+        // Test error structure
+        logMsg('\n2. Testing error structure...');
+        try {
+          await vfs.stat('/nonexistent/file');
+        } catch (err) {
+          logMsg(`   Error code: ${err.code}`);
+          logMsg(`   Error errno: ${err.errno}`);
+          if (err.code === 'ENOENT' && err.errno === -2) {
+            logMsg('   ✓ Error structure correct!', 'success');
+          } else {
+            logMsg('   ✗ Error structure incorrect!', 'error');
+            throw new Error('Error structure test failed');
+          }
+        }
+
+        // Prepare for git init
+        logMsg('\n3. Creating test directory...');
+        await vfs.mkdir('/tmp/test-repo', { recursive: true });
+        vfs.cwd = '/tmp/test-repo';
+        logMsg('   ✓ Test directory created', 'success');
+
+        // Test git init
+        logMsg('\n4. Running git init...');
+        let stdout = '';
+        let stderr = '';
+        const exitCode = await commands.git(['init'], {
+          stdin: '',
+          stdout: (s) => { stdout += s; logMsg(`   [stdout] ${s.trim()}`); },
+          stderr: (s) => { stderr += s; logMsg(`   [stderr] ${s.trim()}`, 'error'); },
+          vfs,
+        });
+
+        if (exitCode === 0) {
+          logMsg('\n   ✓ ✓ ✓ GIT INIT SUCCEEDED! ✓ ✓ ✓', 'success');
+          logMsg('   Exit code: 0', 'success');
+          logMsg(`   Output: ${stdout}`, 'success');
+        } else {
+          logMsg(`\n   ✗ Git init failed with exit code: ${exitCode}`, 'error');
+          logMsg(`   Stderr: ${stderr}`, 'error');
+        }
+
+        // Verify .git directory was created
+        logMsg('\n5. Verifying .git directory...');
+        try {
+          const gitStat = await vfs.stat('/tmp/test-repo/.git');
+          if (gitStat.type === 'dir') {
+            logMsg('   ✓ .git directory exists!', 'success');
+
+            // List .git contents
+            const gitContents = await vfs.readdir('/tmp/test-repo/.git');
+            logMsg(`   Contents: ${gitContents.map(e => e.name).join(', ')}`);
+          }
+        } catch (err) {
+          logMsg(`   ✗ .git directory not found: ${err.message}`, 'error');
+        }
+
+        logMsg('\n=== TEST COMPLETE ===', 'success');
+
+      } catch (err) {
+        logMsg(`\n✗ ✗ ✗ TEST FAILED: ${err.message}`, 'error');
+        logMsg(`Stack: ${err.stack}`, 'error');
+      }
+    }
+
+    // Run test automatically
+    runTest();
+  </script>
+</body>
+</html>

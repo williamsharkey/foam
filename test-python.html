@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Python Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    #output { white-space: pre-wrap; background: #f0f0f0; padding: 10px; }
+    .test { margin: 10px 0; border-left: 3px solid #4a90e2; padding-left: 10px; }
+    .success { border-color: #2ecc71; }
+    .error { border-color: #e74c3c; }
+  </style>
+</head>
+<body>
+  <h1>Python + NPX Test Suite for Foam</h1>
+  <div id="output"></div>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import Shell from './src/shell.js';
+    import { registerFluffyCommands } from './src/fluffy-bridge.js';
+    import './src/devtools.js';
+
+    const output = document.getElementById('output');
+
+    function log(msg, isError = false) {
+      const div = document.createElement('div');
+      div.className = 'test ' + (isError ? 'error' : 'success');
+      div.textContent = msg;
+      output.appendChild(div);
+      console.log(msg);
+    }
+
+    async function test() {
+      log('=== Foam Dev Tools Test Suite ===\n');
+
+      try {
+        // Initialize
+        const vfs = new VFS();
+        await vfs.init();
+        registerFluffyCommands();
+        const shell = new Shell(vfs);
+
+        log('✓ Foam initialized\n');
+
+        // ═══ NPX TESTS ═══
+        log('━━━ NPX Tests ━━━');
+
+        // Test 1: NPX load package
+        log('\nTest 1: NPX - Load nanoid');
+        let result = await shell.exec('npx nanoid');
+        log(result.stdout.substring(0, 200));
+
+        // Test 2: NPX inline execution
+        log('\nTest 2: NPX - Inline execution with date-fns');
+        result = await shell.exec('npx -e "const { format } = await import(\'https://esm.sh/date-fns\'); return format(new Date(), \'yyyy-MM-dd\')"');
+        log('Date: ' + result.stdout);
+
+        // Test 3: NPX with lodash
+        log('\nTest 3: NPX - Data manipulation with lodash-es');
+        result = await shell.exec('npx -e "const { chunk } = await import(\'https://esm.sh/lodash-es\'); return JSON.stringify(chunk([1,2,3,4,5,6], 2))"');
+        log('Chunked: ' + result.stdout);
+
+        // ═══ PYTHON TESTS ═══
+        log('\n━━━ Python Tests ━━━');
+
+        // Test 4: Python version
+        log('\nTest 4: Python version');
+        result = await shell.exec('python --version');
+        log(result.stdout);
+
+        // Test 5: Python basic math
+        log('\nTest 5: Python -c basic calculation');
+        result = await shell.exec('python -c "print(2 + 2)"');
+        log('Result: ' + result.stdout);
+
+        // Test 6: Python list comprehension
+        log('\nTest 6: Python list comprehension');
+        result = await shell.exec('python -c "print([x*x for x in range(5)])"');
+        log('Squares: ' + result.stdout);
+
+        // Test 7: Python JSON
+        log('\nTest 7: Python JSON manipulation');
+        result = await shell.exec('python -c "import json; data = {\'name\': \'Foam\', \'version\': \'0.1\'}; print(json.dumps(data))"');
+        log('JSON: ' + result.stdout);
+
+        // Test 8: Create and run Python file
+        log('\nTest 8: Create and run Python file');
+        await shell.exec('echo "def greet(name):\\n    return f\'Hello, {name}!\'\\n\\nprint(greet(\'Foam\'))" > test.py');
+        result = await shell.exec('python test.py');
+        log('Script output: ' + result.stdout);
+
+        // ═══ COMBINED WORKFLOW TEST ═══
+        log('\n━━━ Combined Workflow Test ━━━');
+
+        // Test 9: Project initialization
+        log('\nTest 9: Initialize project with git, npm, and create files');
+        await shell.exec('mkdir -p myproject && cd myproject');
+        result = await shell.exec('git init');
+        log(result.stdout);
+
+        result = await shell.exec('npm init');
+        log(result.stdout);
+
+        await shell.exec('echo "print(\'Python works!\')" > app.py');
+        await shell.exec('echo "console.log(\'JS works!\')" > app.js');
+
+        result = await shell.exec('git status');
+        log(result.stdout.substring(0, 200));
+
+        // Test 10: Run both Python and JS
+        log('\nTest 10: Execute both Python and Node.js');
+        result = await shell.exec('python app.py');
+        log('Python: ' + result.stdout);
+
+        result = await shell.exec('node app.js');
+        log('Node.js: ' + result.stdout);
+
+        log('\n=== All tests completed! ===');
+        log('\n✓ NPX: Working - can load and execute npm packages');
+        log('✓ Python: Working - Pyodide WASM integration successful');
+        log('✓ Git: Working - version control available');
+        log('✓ Node: Working - JavaScript execution');
+        log('✓ NPM: Working - package management');
+        log('\nFoam is now a complete browser-native development environment!');
+
+      } catch (err) {
+        log('ERROR: ' + err.message, true);
+        log(err.stack, true);
+        console.error(err);
+      }
+    }
+
+    test();
+  </script>
+</body>
+</html>

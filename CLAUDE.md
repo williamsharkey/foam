@@ -1,5 +1,9 @@
 # CLAUDE.md - Guide for AI Assistants Working on Foam
 
+## Project Vision — READ THIS FIRST
+
+The goal is a **fully functional browser-native Linux system where Claude Code (Spirit) runs with no external server**. The nimbus dashboard is just tooling — it could be thrown away. What matters is foam becoming a real development environment: git, npm, node, editors, compilers, and Spirit all working in-browser. **There is always work to do** — if your task is done, find the next missing Linux capability and implement it.
+
 ## What is Foam?
 
 Foam is a browser-native cloud OS — a virtual Linux-like terminal powered by Claude, running entirely in the browser with no backend. It's the plain JavaScript sister project to Shiro (which uses TypeScript/Vite). Both share the same shell semantics and can run Spirit (the Claude Code agent).

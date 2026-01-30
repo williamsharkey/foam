@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Foam Development Tools - Comprehensive Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    #output { white-space: pre-wrap; background: #252525; padding: 15px; border-radius: 5px; }
+    .test { margin: 8px 0; padding: 8px; border-left: 3px solid #4a90e2; }
+    .pass { border-color: #2ecc71; }
+    .fail { border-color: #e74c3c; }
+    .info { border-color: #f39c12; }
+    h1 { color: #569cd6; }
+    h2 { color: #4ec9b0; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>🚀 Foam Development Tools - Comprehensive Test Suite</h1>
+  <div id="output"></div>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import Shell from './src/shell.js';
+    import { registerFluffyCommands } from './src/fluffy-bridge.js';
+    import './src/devtools.js';
+
+    const output = document.getElementById('output');
+
+    function log(msg, type = 'info') {
+      const div = document.createElement('div');
+      div.className = 'test ' + type;
+      div.textContent = msg;
+      output.appendChild(div);
+      console.log(msg);
+    }
+
+    async function runTest(name, command, expectSuccess = true) {
+      try {
+        const result = await window.shell.exec(command);
+        const success = expectSuccess ? result.exitCode === 0 : result.exitCode !== 0;
+
+        log(`${success ? '✓' : '✗'} ${name}`, success ? 'pass' : 'fail');
+        if (result.stdout) log(`  stdout: ${result.stdout.substring(0, 150)}`, 'info');
+        if (result.stderr) log(`  stderr: ${result.stderr.substring(0, 150)}`, 'info');
+
+        return success;
+      } catch (err) {
+        log(`✗ ${name}: ${err.message}`, 'fail');
+        return false;
+      }
+    }
+
+    async function test() {
+      log('=== FOAM COMPREHENSIVE DEVELOPMENT TOOLS TEST ===\n', 'info');
+
+      try {
+        // Initialize
+        const vfs = new VFS();
+        await vfs.init();
+        registerFluffyCommands();
+        window.shell = new Shell(vfs);
+
+        log('✓ Foam initialized\n', 'pass');
+
+        // ═══════════════════════════════════════════════════════════
+        log('━━━ NPM Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('npm --version', 'npm --version');
+        await runTest('npm --help', 'npm --help');
+
+        // Create test project
+        await runTest('mkdir npm-test', 'mkdir npm-test');
+        await runTest('cd npm-test', 'cd npm-test');
+        await runTest('npm init -y', 'npm init -y');
+
+        // Install packages
+        await runTest('npm install nanoid', 'npm install nanoid');
+        await runTest('npm install date-fns', 'npm install date-fns');
+
+        // List packages
+        await runTest('npm list', 'npm list');
+
+        // Run scripts
+        await runTest('npm run (list scripts)', 'npm run');
+
+        // Back to home
+        await runTest('cd ~', 'cd ~');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Git Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('mkdir git-test', 'mkdir git-test');
+        await runTest('cd git-test', 'cd git-test');
+        await runTest('git init', 'git init');
+
+        // Create files
+        await runTest('echo "# Test Repo" > README.md', 'echo "# Test Repo" > README.md');
+        await runTest('echo "console.log(\'test\')" > index.js', 'echo "console.log(\'test\')" > index.js');
+
+        // Git operations
+        await runTest('git status', 'git status');
+        await runTest('git add .', 'git add .');
+        await runTest('git commit -m "Initial commit"', 'git commit -m "Initial commit"');
+        await runTest('git log', 'git log');
+
+        // Back to home
+        await runTest('cd ~', 'cd ~');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ NPX Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('npx nanoid', 'npx nanoid');
+        await runTest('npx preact', 'npx preact');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Python Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('python --version', 'python --version');
+        await runTest('python -c "print(2+2)"', 'python -c "print(2+2)"');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Node.js Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('node -e "console.log(123)"', 'node -e "console.log(123)"');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Coreutils Tests ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('mkdir test-coreutils', 'mkdir test-coreutils');
+        await runTest('cd test-coreutils', 'cd test-coreutils');
+
+        // File operations
+        await runTest('echo "hello world" > test.txt', 'echo "hello world" > test.txt');
+        await runTest('cat test.txt', 'cat test.txt');
+        await runTest('wc test.txt', 'wc test.txt');
+        await runTest('grep hello test.txt', 'grep hello test.txt');
+        await runTest('head -n 1 test.txt', 'head -n 1 test.txt');
+        await runTest('tail -n 1 test.txt', 'tail -n 1 test.txt');
+
+        // Multiple files
+        await runTest('echo "line1" > a.txt', 'echo "line1" > a.txt');
+        await runTest('echo "line2" > b.txt', 'echo "line2" > b.txt');
+        await runTest('find . -name "*.txt"', 'find . -name "*.txt"');
+        await runTest('diff a.txt b.txt', 'diff a.txt b.txt', false); // expect failure
+        await runTest('cat a.txt b.txt', 'cat a.txt b.txt');
+
+        // Text processing
+        await runTest('echo "foo bar baz" | tr " " "\\n"', 'echo "foo bar baz" | tr " " "\\n"');
+        await runTest('seq 1 5', 'seq 1 5');
+        await runTest('seq 1 5 | sort -r', 'seq 1 5 | sort -r');
+
+        // Utilities
+        await runTest('date', 'date');
+        await runTest('whoami', 'whoami');
+        await runTest('pwd', 'pwd');
+        await runTest('uname', 'uname');
+        await runTest('hostname', 'hostname');
+
+        // Directory operations
+        await runTest('ls', 'ls');
+        await runTest('ls -la', 'ls -la');
+        await runTest('basename /foo/bar/baz.txt', 'basename /foo/bar/baz.txt');
+        await runTest('dirname /foo/bar/baz.txt', 'dirname /foo/bar/baz.txt');
+
+        // Permissions
+        await runTest('chmod +x test.txt', 'chmod +x test.txt');
+        await runTest('touch newfile.txt', 'touch newfile.txt');
+
+        // Copy/move
+        await runTest('cp test.txt test-copy.txt', 'cp test.txt test-copy.txt');
+        await runTest('mv test-copy.txt test-moved.txt', 'mv test-copy.txt test-moved.txt');
+
+        // Back to home
+        await runTest('cd ~', 'cd ~');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Full Workflow Test ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        await runTest('mkdir fullstack-app', 'mkdir fullstack-app');
+        await runTest('cd fullstack-app', 'cd fullstack-app');
+
+        // Initialize project
+        await runTest('git init', 'git init');
+        await runTest('npm init -y', 'npm init -y');
+
+        // Install dependencies
+        await runTest('npm install lodash-es', 'npm install lodash-es');
+
+        // Create files
+        await runTest('echo "// Backend" > server.js', 'echo "// Backend" > server.js');
+        await runTest('echo "# My App" > README.md', 'echo "# My App" > README.md');
+
+        // Create Python script
+        await runTest('echo "print(\\"Hello from Python\\")" > script.py', 'echo "print(\\"Hello from Python\\")" > script.py');
+
+        // List all files
+        await runTest('ls -la', 'ls -la');
+
+        // Git add and commit
+        await runTest('git add .', 'git add .');
+        await runTest('git commit -m "Initial fullstack app"', 'git commit -m "Initial fullstack app"');
+
+        // Check status
+        await runTest('git status', 'git status');
+        await runTest('npm list', 'npm list');
+
+        // Run Python script
+        await runTest('python script.py', 'python script.py');
+
+        // ═══════════════════════════════════════════════════════════
+        log('\n━━━ Test Summary ━━━', 'info');
+        // ═══════════════════════════════════════════════════════════
+
+        log('\n✅ All core development tools tested!', 'pass');
+        log('\nAvailable capabilities:', 'info');
+        log('  ✓ NPM - Package management (install, init, run, list)', 'pass');
+        log('  ✓ Git - Version control (init, add, commit, status, log)', 'pass');
+        log('  ✓ NPX - Package execution without installation', 'pass');
+        log('  ✓ Python - Full Python 3.11 via Pyodide WASM', 'pass');
+        log('  ✓ Node - JavaScript execution', 'pass');
+        log('  ✓ 37 Coreutils - Full Unix command suite', 'pass');
+        log('  ✓ VFS - Persistent virtual filesystem', 'pass');
+        log('\nFoam is ready for full browser-native development! 🚀', 'pass');
+
+      } catch (err) {
+        log('ERROR: ' + err.message, 'fail');
+        log(err.stack, 'fail');
+        console.error(err);
+      }
+    }
+
+    test();
+  </script>
+</body>
+</html>

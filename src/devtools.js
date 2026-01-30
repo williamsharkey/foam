@@ -243,17 +243,52 @@ commands.git = async (args, { stdout, stderr, vfs }) => {
 
 // ─── NPM ────────────────────────────────────────────────────────────────────
 
-commands.npm = async (args, { stdout, stderr, vfs }) => {
-  if (args.length === 0) { stderr('Usage: npm <command>\n'); return 1; }
+commands.npm = async (args, { stdout, stderr, vfs, exec }) => {
+  if (args.length === 0) {
+    stdout('Usage: npm <command>\n\n');
+    stdout('Commands:\n');
+    stdout('  init              Create package.json\n');
+    stdout('  install [pkg]     Install package(s)\n');
+    stdout('  run <script>      Run package.json script\n');
+    stdout('  list, ls          List installed packages\n');
+    stdout('  --version         Show npm version\n');
+    return 0;
+  }
+
   const sub = args[0];
 
+  // Version info
+  if (sub === '--version' || sub === '-v') {
+    stdout('10.2.4 (Foam browser-native)\n');
+    return 0;
+  }
+
+  // Help
+  if (sub === '--help' || sub === 'help') {
+    stdout('npm <command>\n\n');
+    stdout('Commands:\n');
+    stdout('  init              Create package.json\n');
+    stdout('  install [pkg]     Install from registry.npmjs.org or esm.sh\n');
+    stdout('  run <script>      Execute package.json script\n');
+    stdout('  list, ls          List installed packages\n');
+    return 0;
+  }
+
+  // npm init
   if (sub === 'init') {
+    const yFlag = args.includes('-y') || args.includes('--yes');
     const pkg = {
       name: vfs.cwd.split('/').pop() || 'project',
       version: '1.0.0',
       description: '',
       main: 'index.js',
-      scripts: { start: 'node index.js', test: 'echo "no test specified"' },
+      scripts: {
+        start: 'node index.js',
+        test: 'echo "Error: no test specified" && exit 1'
+      },
+      keywords: [],
+      author: '',
+      license: 'ISC',
       dependencies: {},
     };
     await vfs.writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
@@ -261,48 +296,60 @@ commands.npm = async (args, { stdout, stderr, vfs }) => {
     return 0;
   }
 
+  // npm install
   if (sub === 'install' || sub === 'i') {
     const pkgName = args[1];
+
+    // No package specified - install from package.json
     if (!pkgName) {
-      stdout('npm install: nothing to install\n');
-      return 0;
-    }
-    await vfs.mkdir('node_modules', { recursive: true });
-    await vfs.mkdir(`node_modules/${pkgName}`, { recursive: true });
+      try {
+        const pkgJson = JSON.parse(await vfs.readFile('package.json'));
+        const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+        if (Object.keys(deps).length === 0) {
+          stdout('up to date\n');
+          return 0;
+        }
 
-    try {
-      stdout(`Fetching ${pkgName} from esm.sh...\n`);
-      const res = await globalThis.fetch(`https://esm.sh/${pkgName}`);
-      if (res.ok) {
-        const code = await res.text();
-        await vfs.writeFile(`node_modules/${pkgName}/index.js`, code);
-        stdout(`+ ${pkgName}\n`);
+        await vfs.mkdir('node_modules', { recursive: true });
+        let installed = 0;
 
-        try {
-          const pkgJson = JSON.parse(await vfs.readFile('package.json'));
-          pkgJson.dependencies = pkgJson.dependencies || {};
-          pkgJson.dependencies[pkgName] = 'latest';
-          await vfs.writeFile('package.json', JSON.stringify(pkgJson, null, 2) + '\n');
-        } catch (_) {}
-      } else {
-        stderr(`npm ERR! 404 Not Found: ${pkgName}\n`);
+        for (const [name, version] of Object.entries(deps)) {
+          try {
+            stdout(`Installing ${name}@${version}...\n`);
+            await installPackage(name, version, vfs, stdout, stderr);
+            installed++;
+          } catch (err) {
+            stderr(`Failed to install ${name}: ${err.message}\n`);
+          }
+        }
+
+        stdout(`\nadded ${installed} packages\n`);
+        return 0;
+      } catch (err) {
+        stderr(`npm ERR! ${err.message}\n`);
         return 1;
       }
-    } catch (err) {
-      stderr(`npm ERR! network error: ${err.message}\n`);
-      return 1;
     }
-    return 0;
-  }
 
-  if (sub === 'run') {
-    const script = args[1];
-    if (!script) { stderr('Usage: npm run <script>\n'); return 1; }
+    // Install specific package
     try {
-      const pkgJson = JSON.parse(await vfs.readFile('package.json'));
-      const cmd = pkgJson.scripts?.[script];
-      if (!cmd) { stderr(`npm ERR! Missing script: "${script}"\n`); return 1; }
-      stdout(`> ${cmd}\n`);
+      await vfs.mkdir('node_modules', { recursive: true });
+      const version = args[2] || 'latest';
+
+      stdout(`Installing ${pkgName}...\n`);
+      await installPackage(pkgName, version, vfs, stdout, stderr);
+
+      // Update package.json if it exists
+      try {
+        const pkgJson = JSON.parse(await vfs.readFile('package.json'));
+        pkgJson.dependencies = pkgJson.dependencies || {};
+        pkgJson.dependencies[pkgName] = version === 'latest' ? '^1.0.0' : version;
+        await vfs.writeFile('package.json', JSON.stringify(pkgJson, null, 2) + '\n');
+      } catch (_) {
+        // No package.json, that's ok
+      }
+
+      stdout(`\nadded 1 package\n`);
       return 0;
     } catch (err) {
       stderr(`npm ERR! ${err.message}\n`);
@@ -310,9 +357,188 @@ commands.npm = async (args, { stdout, stderr, vfs }) => {
     }
   }
 
-  stderr(`npm: unknown command '${sub}'\n`);
+  // npm run
+  if (sub === 'run' || sub === 'run-script') {
+    const script = args[1];
+    if (!script) {
+      // List available scripts
+      try {
+        const pkgJson = JSON.parse(await vfs.readFile('package.json'));
+        const scripts = pkgJson.scripts || {};
+        if (Object.keys(scripts).length === 0) {
+          stdout('No scripts available\n');
+          return 0;
+        }
+        stdout('Available scripts:\n');
+        for (const [name, cmd] of Object.entries(scripts)) {
+          stdout(`  ${name}\n    ${cmd}\n`);
+        }
+        return 0;
+      } catch (err) {
+        stderr(`npm ERR! ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    try {
+      const pkgJson = JSON.parse(await vfs.readFile('package.json'));
+      const cmd = pkgJson.scripts?.[script];
+      if (!cmd) {
+        stderr(`npm ERR! Missing script: "${script}"\n\n`);
+        stderr('Available scripts:\n');
+        for (const name of Object.keys(pkgJson.scripts || {})) {
+          stderr(`  ${name}\n`);
+        }
+        return 1;
+      }
+
+      stdout(`\n> ${pkgJson.name}@${pkgJson.version} ${script}\n`);
+      stdout(`> ${cmd}\n\n`);
+
+      // Execute the script command
+      if (exec && typeof exec === 'function') {
+        const result = await exec(cmd);
+        if (result.stdout) stdout(result.stdout);
+        if (result.stderr) stderr(result.stderr);
+        return result.exitCode || 0;
+      } else {
+        // Fallback: just show the command
+        stdout(`(Script execution requires exec context)\n`);
+        return 0;
+      }
+    } catch (err) {
+      stderr(`npm ERR! ${err.message}\n`);
+      return 1;
+    }
+  }
+
+  // npm list / ls
+  if (sub === 'list' || sub === 'ls') {
+    try {
+      const entries = await vfs.readdir('node_modules');
+      if (entries.length === 0) {
+        stdout('(empty)\n');
+        return 0;
+      }
+
+      // Try to read package.json for project name
+      let projectName = 'project';
+      let projectVersion = '1.0.0';
+      try {
+        const pkgJson = JSON.parse(await vfs.readFile('package.json'));
+        projectName = pkgJson.name || projectName;
+        projectVersion = pkgJson.version || projectVersion;
+      } catch (_) {}
+
+      stdout(`${projectName}@${projectVersion} ${vfs.cwd}\n`);
+      for (const entry of entries) {
+        if (entry.type === 'dir' && !entry.name.startsWith('.')) {
+          // Try to read package version
+          let version = '';
+          try {
+            const pkgPath = `node_modules/${entry.name}/package.json`;
+            const pkgData = JSON.parse(await vfs.readFile(pkgPath));
+            version = `@${pkgData.version}`;
+          } catch (_) {
+            version = '@latest';
+          }
+          stdout(`├── ${entry.name}${version}\n`);
+        }
+      }
+      return 0;
+    } catch (err) {
+      stderr(`npm ERR! ${err.message}\n`);
+      return 1;
+    }
+  }
+
+  stderr(`npm ERR! Unknown command: "${sub}"\n`);
+  stderr('Run "npm --help" for usage\n');
   return 1;
 };
+
+// Helper function to install a package
+async function installPackage(pkgName, version, vfs, stdout, stderr) {
+  const pkgDir = `node_modules/${pkgName}`;
+  await vfs.mkdir(pkgDir, { recursive: true });
+
+  // Try registry.npmjs.org first (with CORS proxy)
+  try {
+    const registryUrl = `https://registry.npmjs.org/${pkgName}`;
+
+    // Fetch package metadata from npm registry (via CORS proxy)
+    const metaRes = await globalThis.fetch(registryUrl);
+
+    if (metaRes.ok) {
+      const meta = await metaRes.json();
+      const versionToInstall = version === 'latest' ? meta['dist-tags']?.latest : version;
+      const versionData = meta.versions?.[versionToInstall];
+
+      if (!versionData) {
+        throw new Error(`Version ${version} not found`);
+      }
+
+      // Create package.json in node_modules
+      const pkgJson = {
+        name: versionData.name,
+        version: versionData.version,
+        description: versionData.description,
+        main: versionData.main || 'index.js',
+        dependencies: versionData.dependencies || {},
+      };
+
+      await vfs.writeFile(`${pkgDir}/package.json`, JSON.stringify(pkgJson, null, 2));
+
+      // Try to fetch from esm.sh as browser-compatible ESM
+      stdout(`  Fetching ${pkgName}@${versionData.version} from esm.sh...\n`);
+      const esmUrl = `https://esm.sh/${pkgName}@${versionData.version}`;
+      const esmRes = await globalThis.fetch(esmUrl);
+
+      if (esmRes.ok) {
+        const code = await esmRes.text();
+        await vfs.writeFile(`${pkgDir}/index.js`, code);
+        stdout(`  + ${pkgName}@${versionData.version}\n`);
+      } else {
+        // Fallback: create a stub that tells users to use npx
+        const stub = `// ${pkgName}@${versionData.version}
+// This package is not browser-compatible via npm install.
+// Try using: npx -e "const pkg = await import('https://esm.sh/${pkgName}'); ..."
+throw new Error('${pkgName} requires npx or browser-compatible alternative');
+`;
+        await vfs.writeFile(`${pkgDir}/index.js`, stub);
+        stderr(`  Warning: ${pkgName} may not be browser-compatible\n`);
+      }
+
+      return;
+    }
+  } catch (err) {
+    // Registry failed, try esm.sh fallback
+    stdout(`  Trying esm.sh...\n`);
+  }
+
+  // Fallback to esm.sh only
+  try {
+    const esmUrl = version === 'latest'
+      ? `https://esm.sh/${pkgName}`
+      : `https://esm.sh/${pkgName}@${version}`;
+
+    const res = await globalThis.fetch(esmUrl);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+
+    const code = await res.text();
+    await vfs.writeFile(`${pkgDir}/index.js`, code);
+
+    // Create minimal package.json
+    const pkgJson = { name: pkgName, version: version === 'latest' ? '1.0.0' : version };
+    await vfs.writeFile(`${pkgDir}/package.json`, JSON.stringify(pkgJson, null, 2));
+
+    stdout(`  + ${pkgName}@${version}\n`);
+  } catch (err) {
+    throw new Error(`Failed to install ${pkgName}: ${err.message}`);
+  }
+}
 
 // ─── NODE ───────────────────────────────────────────────────────────────────
 
@@ -357,6 +583,380 @@ commands.node = async (args, { stdin, stdout, stderr, vfs }) => {
     return commands.node(['-e', code], { stdin, stdout, stderr, vfs });
   } catch (err) {
     stderr(err.message + '\n');
+    return 1;
+  }
+};
+
+// ─── NPX ────────────────────────────────────────────────────────────────────
+
+commands.npx = async (args, { stdin, stdout, stderr, vfs }) => {
+  if (args.length === 0) {
+    stderr('Usage: npx <package>[@version] [args...]\n');
+    stderr('       npx -e <code>  — execute inline JS with package imports\n');
+    return 1;
+  }
+
+  // Handle -e flag for inline execution
+  if (args[0] === '-e') {
+    const code = args.slice(1).join(' ');
+    if (!code) {
+      stderr('npx -e: missing code to execute\n');
+      return 1;
+    }
+    try {
+      const result = await eval(`(async () => { ${code} })()`);
+      if (result !== undefined) stdout(String(result) + '\n');
+      return 0;
+    } catch (err) {
+      stderr(`npx: ${err.message}\n`);
+      return 1;
+    }
+  }
+
+  // Parse package name and version
+  let pkgSpec = args[0];
+  const restArgs = args.slice(1);
+  let pkgName = pkgSpec;
+  let version = 'latest';
+
+  if (pkgSpec.includes('@') && !pkgSpec.startsWith('@')) {
+    const parts = pkgSpec.split('@');
+    pkgName = parts[0];
+    version = parts[1] || 'latest';
+  } else if (pkgSpec.startsWith('@')) {
+    // Scoped package like @vitejs/plugin-react
+    const parts = pkgSpec.split('@');
+    if (parts.length > 2) {
+      pkgName = '@' + parts[1];
+      version = parts[2];
+    } else {
+      pkgName = pkgSpec;
+    }
+  }
+
+  try {
+    // Build the esm.sh URL
+    const url = version === 'latest'
+      ? `https://esm.sh/${pkgName}`
+      : `https://esm.sh/${pkgName}@${version}`;
+
+    stdout(`Running ${pkgName}@${version} from esm.sh...\n`);
+
+    try {
+      // Try to dynamically import the module
+      const module = await import(url);
+
+      // Create output handlers
+      const logs = [];
+      const outputCtx = {
+        stdout: (txt) => logs.push(txt),
+        stderr: (txt) => stderr(txt),
+        vfs,
+        args: restArgs,
+      };
+
+      // Try different execution patterns
+      let executed = false;
+      let result;
+
+      // Pattern 1: default export is a function
+      if (typeof module.default === 'function') {
+        result = await module.default(...restArgs);
+        executed = true;
+      }
+      // Pattern 2: has a cli/main/run function
+      else if (typeof module.cli === 'function') {
+        result = await module.cli(restArgs, outputCtx);
+        executed = true;
+      } else if (typeof module.main === 'function') {
+        result = await module.main(restArgs, outputCtx);
+        executed = true;
+      } else if (typeof module.run === 'function') {
+        result = await module.run(restArgs, outputCtx);
+        executed = true;
+      }
+
+      // Output any captured logs
+      if (logs.length) stdout(logs.join(''));
+
+      // If we executed something, output the result
+      if (executed) {
+        if (result !== undefined && result !== null) {
+          const output = typeof result === 'object'
+            ? JSON.stringify(result, null, 2)
+            : String(result);
+          stdout(output + '\n');
+        }
+        return 0;
+      }
+
+      // Pattern 3: Module loaded but no CLI entry point - expose it for use
+      stdout(`✓ Loaded ${pkgName}\n`);
+      stdout(`Available exports: ${Object.keys(module).join(', ')}\n`);
+      stdout(`Use 'npx -e "const {...} = await import(\"${url}\"); ..."' to use it\n`);
+      return 0;
+
+    } catch (importErr) {
+      stderr(`npx: failed to load ${pkgName}: ${importErr.message}\n`);
+      stderr(`Tip: Not all npm packages work in the browser\n`);
+      return 1;
+    }
+  } catch (err) {
+    stderr(`npx: ${err.message}\n`);
+    return 1;
+  }
+};
+
+// ─── PYTHON (Pyodide WASM) ──────────────────────────────────────────────────
+
+let pyodide = null;
+
+async function loadPyodide() {
+  if (pyodide) return pyodide;
+
+  try {
+    // Load Pyodide from CDN
+    const pyodideScript = document.createElement('script');
+    pyodideScript.src = 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js';
+    document.head.appendChild(pyodideScript);
+
+    await new Promise((resolve, reject) => {
+      pyodideScript.onload = resolve;
+      pyodideScript.onerror = reject;
+    });
+
+    // Initialize Pyodide
+    pyodide = await globalThis.loadPyodide({
+      indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/',
+    });
+
+    return pyodide;
+  } catch (err) {
+    throw new Error(`Failed to load Pyodide: ${err.message}`);
+  }
+}
+
+commands.python = async (args, { stdin, stdout, stderr, vfs }) => {
+  // Show help or version
+  if (args.includes('--version') || args.includes('-V')) {
+    stdout('Python 3.11.3 (Pyodide)\n');
+    return 0;
+  }
+
+  if (args.includes('--help') || args.includes('-h')) {
+    stdout('Usage: python [options] [-c cmd | file]\n');
+    stdout('Options:\n');
+    stdout('  -c cmd  : Execute Python command\n');
+    stdout('  -m mod  : Run library module as script\n');
+    stdout('  --version : Show Python version\n');
+    return 0;
+  }
+
+  try {
+    // Load Pyodide (async, first run will be slow)
+    stdout('Loading Python (this may take a moment on first run)...\n');
+    const py = await loadPyodide();
+
+    // Handle -c flag (execute code)
+    if (args[0] === '-c') {
+      const code = args.slice(1).join(' ');
+      if (!code) {
+        stderr('python: -c requires code to execute\n');
+        return 1;
+      }
+
+      try {
+        // Redirect Python stdout/stderr
+        py.runPython(`
+import sys
+from io import StringIO
+sys.stdout = StringIO()
+sys.stderr = StringIO()
+`);
+
+        // Run the code
+        py.runPython(code);
+
+        // Get output
+        const pyStdout = py.runPython('sys.stdout.getvalue()');
+        const pyStderr = py.runPython('sys.stderr.getvalue()');
+
+        if (pyStdout) stdout(pyStdout);
+        if (pyStderr) stderr(pyStderr);
+
+        return 0;
+      } catch (err) {
+        stderr(`Python error: ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    // Handle -m flag (run module)
+    if (args[0] === '-m') {
+      const module = args[1];
+      if (!module) {
+        stderr('python: -m requires module name\n');
+        return 1;
+      }
+
+      // Special handling for common modules
+      if (module === 'http.server') {
+        stdout('python: http.server not supported in browser environment\n');
+        return 1;
+      }
+
+      if (module === 'json.tool') {
+        // JSON pretty-print from stdin
+        if (!stdin) {
+          stderr('python: no input provided\n');
+          return 1;
+        }
+        try {
+          const formatted = JSON.stringify(JSON.parse(stdin), null, 2);
+          stdout(formatted + '\n');
+          return 0;
+        } catch (err) {
+          stderr(`python: invalid JSON: ${err.message}\n`);
+          return 1;
+        }
+      }
+
+      try {
+        py.runPython(`
+import sys
+from io import StringIO
+sys.stdout = StringIO()
+sys.stderr = StringIO()
+`);
+
+        py.runPython(`
+import ${module}
+${module}.main()
+`);
+
+        const pyStdout = py.runPython('sys.stdout.getvalue()');
+        const pyStderr = py.runPython('sys.stderr.getvalue()');
+
+        if (pyStdout) stdout(pyStdout);
+        if (pyStderr) stderr(pyStderr);
+
+        return 0;
+      } catch (err) {
+        stderr(`Python error: ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    // Handle file execution
+    if (args.length > 0 && !args[0].startsWith('-')) {
+      const filename = args[0];
+      try {
+        const code = await vfs.readFile(filename);
+
+        py.runPython(`
+import sys
+from io import StringIO
+sys.stdout = StringIO()
+sys.stderr = StringIO()
+`);
+
+        py.runPython(code);
+
+        const pyStdout = py.runPython('sys.stdout.getvalue()');
+        const pyStderr = py.runPython('sys.stderr.getvalue()');
+
+        if (pyStdout) stdout(pyStdout);
+        if (pyStderr) stderr(pyStderr);
+
+        return 0;
+      } catch (err) {
+        stderr(`python: ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    // No args - REPL mode (not supported in non-interactive context)
+    stderr('python: interactive REPL not yet supported\n');
+    stderr('Use: python -c "code" or python file.py\n');
+    return 1;
+
+  } catch (err) {
+    stderr(`python: ${err.message}\n`);
+    return 1;
+  }
+};
+
+// Alias for python3
+commands.python3 = commands.python;
+
+// ─── PIP (Python package manager) ───────────────────────────────────────────
+
+commands.pip = async (args, { stdout, stderr }) => {
+  if (args.length === 0 || args[0] === '--help') {
+    stdout('Usage: pip <command> [options]\n');
+    stdout('\nCommands:\n');
+    stdout('  install <package>  — Install a package using micropip\n');
+    stdout('  list              — List installed packages\n');
+    return 0;
+  }
+
+  try {
+    const py = await loadPyodide();
+
+    if (args[0] === 'install') {
+      const packages = args.slice(1);
+      if (packages.length === 0) {
+        stderr('pip: install requires package name\n');
+        return 1;
+      }
+
+      stdout(`Installing ${packages.join(', ')}...\n`);
+
+      try {
+        await py.loadPackage('micropip');
+        for (const pkg of packages) {
+          await py.runPythonAsync(`
+import micropip
+await micropip.install('${pkg}')
+`);
+        }
+        stdout('Successfully installed packages\n');
+        return 0;
+      } catch (err) {
+        stderr(`pip: installation failed: ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    if (args[0] === 'list') {
+      try {
+        const result = py.runPython(`
+import sys
+import json
+packages = []
+if hasattr(sys, 'modules'):
+    for name in sorted(sys.modules.keys()):
+        if not name.startswith('_'):
+            packages.append(name)
+json.dumps(packages[:20])  # Limit to first 20
+`);
+        const packages = JSON.parse(result);
+        stdout('Installed packages:\n');
+        for (const pkg of packages) {
+          stdout(`  ${pkg}\n`);
+        }
+        return 0;
+      } catch (err) {
+        stderr(`pip: ${err.message}\n`);
+        return 1;
+      }
+    }
+
+    stderr(`pip: unknown command '${args[0]}'\n`);
+    return 1;
+
+  } catch (err) {
+    stderr(`pip: ${err.message}\n`);
     return 1;
   }
 };

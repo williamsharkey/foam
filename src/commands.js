@@ -11,6 +11,16 @@ const commands = {};
 
 // ─── SHELL BUILTINS (need direct VFS/shell access) ──────────────────────────
 
+commands.exit = async (args, { terminal }) => {
+  const code = parseInt(args[0]) || 0;
+  if (terminal) {
+    terminal.write(`\nExiting with code ${code}\n`);
+  }
+  // In a real shell, this would exit the process
+  // In browser context, we just return the exit code
+  return code;
+};
+
 commands.cd = async (args, { stderr, vfs }) => {
   const target = args[0] || '~';
   try {
@@ -81,7 +91,7 @@ commands.help = async (args, { stdout }) => {
     stdout('  ' + row + '\n');
   }
   stdout('\nFoam-specific: dom, js, glob, fetch, curl, sleep, seq\n');
-  stdout('Dev tools:     git, npm, node\n');
+  stdout('Dev tools:     git, npm, npx, node, python, pip\n');
   stdout('Claude:        claude "your message"\n');
   stdout('Config:        foam config set api_key <key>\n');
   return 0;

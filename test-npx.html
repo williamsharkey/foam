@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NPX Test</title>
+</head>
+<body>
+  <h1>NPX Implementation Test</h1>
+  <pre id="output"></pre>
+
+  <script type="module">
+    import VFS from './src/vfs.js';
+    import Shell from './src/shell.js';
+    import { registerFluffyCommands } from './src/fluffy-bridge.js';
+    import './src/devtools.js';
+
+    const output = document.getElementById('output');
+
+    function log(msg) {
+      output.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function test() {
+      try {
+        log('=== NPX Test Suite ===\n');
+
+        // Initialize
+        const vfs = new VFS();
+        await vfs.init();
+        registerFluffyCommands();
+        const shell = new Shell(vfs);
+
+        log('✓ Foam initialized\n');
+
+        // Test 1: npx --help
+        log('Test 1: npx (no args)');
+        let result = await shell.exec('npx');
+        log(result.stderr);
+        log('');
+
+        // Test 2: Load a library
+        log('Test 2: Load nanoid library');
+        result = await shell.exec('npx nanoid');
+        log(result.stdout);
+        log('');
+
+        // Test 3: npx -e inline execution
+        log('Test 3: npx -e with nanoid');
+        result = await shell.exec('npx -e "const { nanoid } = await import(\'https://esm.sh/nanoid\'); return nanoid()"');
+        log(result.stdout);
+        log('');
+
+        // Test 4: Try a package with a CLI entry point
+        log('Test 4: Load chalk (for styling)');
+        result = await shell.exec('npx chalk');
+        log(result.stdout);
+        log('');
+
+        // Test 5: Use chalk via -e
+        log('Test 5: Use chalk via npx -e');
+        result = await shell.exec('npx -e "const chalk = (await import(\'https://esm.sh/chalk@5\')).default; return chalk.blue(\'Hello World!\')"');
+        log(result.stdout);
+        log('');
+
+        // Test 6: Load date-fns
+        log('Test 6: Load date-fns');
+        result = await shell.exec('npx date-fns');
+        log(result.stdout);
+        log('');
+
+        // Test 7: Use date-fns via -e
+        log('Test 7: Use date-fns formatting via npx -e');
+        result = await shell.exec('npx -e "const { format } = await import(\'https://esm.sh/date-fns\'); return format(new Date(), \'yyyy-MM-dd HH:mm:ss\')"');
+        log(result.stdout);
+        log('');
+
+        log('\n=== All tests completed! ===');
+
+      } catch (err) {
+        log('ERROR: ' + err.message);
+        console.error(err);
+      }
+    }
+
+    test();
+  </script>
+</body>
+</html>
