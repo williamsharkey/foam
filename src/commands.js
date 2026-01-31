@@ -789,13 +789,20 @@ commands.more = commands.less;
 commands.make = async (args, { stdout, stderr, vfs, exec }) => {
   if (!exec) { stderr('make: no exec context\n'); return 1; }
 
-  const target = args[0] || 'all';
   let makefilePath = 'Makefile';
+  const positional = [];
 
-  // Check for -f flag
+  // Parse arguments
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '-f' && args[i + 1]) { makefilePath = args[i + 1]; break; }
+    if (args[i] === '-f' && args[i + 1]) {
+      makefilePath = args[i + 1];
+      i++; // skip the filename
+    } else if (!args[i].startsWith('-')) {
+      positional.push(args[i]);
+    }
   }
+
+  const target = positional[0] || 'all';
 
   let content;
   try {

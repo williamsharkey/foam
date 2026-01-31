@@ -565,10 +565,18 @@ class VFS {
   _globToRegex(pattern) {
     let re = pattern
       .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      // Handle ? first (single char wildcard)
+      .replace(/\?/g, '§QUESTION§')
+      // Handle **/ as "any path including empty" (matches dir/ or nothing)
+      .replace(/\*\*\//g, '§DOUBLESTARSLASH§')
+      // Handle ** as "match anything"
       .replace(/\*\*/g, '§DOUBLESTAR§')
+      // Handle * as "match anything except /"
       .replace(/\*/g, '[^/]*')
-      .replace(/§DOUBLESTAR§/g, '.*')
-      .replace(/\?/g, '[^/]');
+      // Now replace placeholders with final regex parts
+      .replace(/§QUESTION§/g, '[^/]')
+      .replace(/§DOUBLESTARSLASH§/g, '(.*\\/)?')
+      .replace(/§DOUBLESTAR§/g, '.*');
     return new RegExp('^' + re + '$');
   }
 }

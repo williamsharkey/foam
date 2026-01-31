@@ -80,7 +80,7 @@ function createFluffyFS(vfs) {
 
 /**
  * Adapt a FluffyCommand to Foam's command signature:
- *   async (args, { stdin, stdout, stderr, vfs, env }) => exitCode
+ *   async (args, { stdin, stdout, stderr, vfs, env, exec }) => exitCode
  */
 function adaptCommand(fluffyCmd) {
   return async (args, ctx) => {
@@ -90,6 +90,8 @@ function adaptCommand(fluffyCmd) {
       env: ctx.vfs.env,
       cwd: ctx.vfs.cwd,
       fs,
+      // Pass through exec for commands like xargs that need to run subcommands
+      exec: ctx.exec,
     };
     const result = await fluffyCmd.exec(args, io);
     if (result.stdout) ctx.stdout(result.stdout);
