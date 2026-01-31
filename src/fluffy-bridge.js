@@ -103,11 +103,14 @@ function adaptCommand(fluffyCmd) {
 /**
  * Register all fluffycoreutils commands into Foam's command map.
  * Does NOT overwrite commands that already exist in Foam
- * (so Foam-specific commands like dom, js, glob, fetch, curl are preserved).
+ * (so Foam-specific commands like dom, js, glob, source, type, which are preserved).
  */
 export function registerFluffyCommands() {
   for (const [name, cmd] of Object.entries(allCommands)) {
-    commands[name] = adaptCommand(cmd);
+    // Don't overwrite Foam-specific commands that need shell/VFS access
+    if (!commands[name]) {
+      commands[name] = adaptCommand(cmd);
+    }
   }
 }
 
