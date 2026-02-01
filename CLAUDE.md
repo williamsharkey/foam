@@ -25,7 +25,7 @@ src/
 test/
 ├── run-tests-skyeyes.js    # Test runner using skyeyes bridge
 ├── skyeyes-helper.js       # Skyeyes test helper utilities
-├── run-tests.js            # Test runner using Puppeteer
+├── run-tests.js            # Legacy test runner (deprecated)
 └── smoke.test.html         # Browser-based smoke tests
 ```
 
@@ -33,7 +33,7 @@ test/
 
 ```bash
 npm test                # Run tests via skyeyes
-npm run test:puppeteer  # Run tests via Puppeteer
+npm run test:linkedom   # Run tests via linkedom (fast, no browser)
 ```
 
 There is no build step — Foam uses plain ES modules served directly. Deploy by pushing to main (GitHub Pages auto-deploys via GitHub Actions with `workflow_dispatch` for manual trigger).
