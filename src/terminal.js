@@ -61,7 +61,7 @@ class Terminal {
   getSize() {
     // Estimate based on font size and container
     const fontSize = 14;
-    const lineHeight = 1.3;
+    const lineHeight = 1.12;
     const charWidth = fontSize * 0.6; // Approximate monospace width
     const charHeight = fontSize * lineHeight;
     const rows = Math.floor(this.container.clientHeight / charHeight) || 24;
